@@ -217,6 +217,20 @@ fn show_status(project_id: &str) -> Result<()> {
     for (title, cmd) in config.action_command_overrides.iter().take(5) {
         println!("override:{} => {}", title, cmd);
     }
+    println!("next_suggestion_matches: {}", state.next_suggestions.len().min(5));
+    for suggestion in state.next_suggestions.iter().take(5) {
+        println!("suggestion:{} [{}] => {}", suggestion.title, match suggestion.kind {
+            workflow::WorkflowSuggestionKind::Feature => "feature",
+            workflow::WorkflowSuggestionKind::BugScan => "bug_scan",
+            workflow::WorkflowSuggestionKind::BugFix => "bug_fix",
+            workflow::WorkflowSuggestionKind::DocSync => "doc_sync",
+            workflow::WorkflowSuggestionKind::Refactor => "refactor",
+            workflow::WorkflowSuggestionKind::Performance => "performance",
+            workflow::WorkflowSuggestionKind::Test => "test",
+            workflow::WorkflowSuggestionKind::Collect => "collect",
+            workflow::WorkflowSuggestionKind::Commit => "commit",
+        }, resolve_action_match(&config, suggestion));
+    }
     println!("last_error_category: {}", if state.last_error_category.is_empty() { "<none>" } else { &state.last_error_category });
     println!("recovery_hint: {}", if state.recovery_hint.is_empty() { "<none>" } else { &state.recovery_hint });
     println!("last_summary: {}", state.last_summary);
@@ -239,6 +253,36 @@ fn load_state(project_id: &str) -> Result<ManagedProjectState> {
     let content = fs::read_to_string(&path).with_context(|| format!("missing {}", path))?;
     Ok(serde_json::from_str(&content)?)
 }
+fn resolve_action_match(config: &ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> String {
+    if let Some(cmd) = config.action_command_overrides.get(&suggestion.title) {
+        format!("override:{} => {}", suggestion.title, cmd)
+    } else if let Some(cmd) = config.action_commands.get(match suggestion.kind {
+        workflow::WorkflowSuggestionKind::Feature => "feature",
+        workflow::WorkflowSuggestionKind::BugScan => "bug_scan",
+        workflow::WorkflowSuggestionKind::BugFix => "bug_fix",
+        workflow::WorkflowSuggestionKind::DocSync => "doc_sync",
+        workflow::WorkflowSuggestionKind::Refactor => "refactor",
+        workflow::WorkflowSuggestionKind::Performance => "performance",
+        workflow::WorkflowSuggestionKind::Test => "test",
+        workflow::WorkflowSuggestionKind::Collect => "collect",
+        workflow::WorkflowSuggestionKind::Commit => "commit",
+    }) {
+        format!("kind:{} => {}", match suggestion.kind {
+            workflow::WorkflowSuggestionKind::Feature => "feature",
+            workflow::WorkflowSuggestionKind::BugScan => "bug_scan",
+            workflow::WorkflowSuggestionKind::BugFix => "bug_fix",
+            workflow::WorkflowSuggestionKind::DocSync => "doc_sync",
+            workflow::WorkflowSuggestionKind::Refactor => "refactor",
+            workflow::WorkflowSuggestionKind::Performance => "performance",
+            workflow::WorkflowSuggestionKind::Test => "test",
+            workflow::WorkflowSuggestionKind::Collect => "collect",
+            workflow::WorkflowSuggestionKind::Commit => "commit",
+        }, cmd)
+    } else {
+        "fallback:planned".to_string()
+    }
+}
+
 
 fn save_state(project_id: &str, state: &ManagedProjectState) -> Result<()> {
     write_json(&format!("state/{}.json", project_id), state)
