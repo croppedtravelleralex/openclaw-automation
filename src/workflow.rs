@@ -3,7 +3,7 @@ use std::{fs, path::{Path, PathBuf}, process::Command};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{AutopilotStage, ManagedProjectConfig, ManagedProjectState};
+use crate::{AutopilotStage, ConfirmationPolicy, ManagedProjectConfig, ManagedProjectState};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +51,12 @@ pub struct WorkflowReport {
     pub summary: String,
     pub focus: String,
     pub confirmations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrategyDecision {
+    AutoProceed,
+    RequireConfirmation(ConfirmationPolicy),
 }
 
 impl WorkflowDocumentContext {
@@ -209,7 +215,7 @@ pub fn run_minimal_cycle_step(root: &Path, config: &ManagedProjectConfig, state:
             state.current_focus = "进入 bug 环并锁定问题".to_string();
             state.current_objective = "优先定位最值得修复的问题".to_string();
             state.last_summary = "已完成 bug_scan，进入 bug_fix".to_string();
-            state.pending_confirmation.push("进入 bug 环：建议检查 flaky、warning、状态漂移并确认修复优先级".to_string());
+            push_confirmation_once(state, "进入 bug 环：建议检查 flaky、warning、状态漂移并确认修复优先级".to_string());
             state.stage = AutopilotStage::BugFix;
             state.next_suggestions = default_suggestions_for_stage(state.stage);
         }
@@ -229,7 +235,7 @@ pub fn run_minimal_cycle_step(root: &Path, config: &ManagedProjectConfig, state:
             state.next_suggestions = default_suggestions_for_stage(state.stage);
         }
         AutopilotStage::CommitPush => {
-            let commit_result = run_commit_guarded(root, state)?;
+            let commit_result = run_commit_guarded(root, config, state)?;
             state.current_focus = "提交当前稳定成果".to_string();
             state.current_objective = "commit 当前轮结果，并按条件评估 push".to_string();
             state.last_summary = commit_result;
@@ -240,6 +246,7 @@ pub fn run_minimal_cycle_step(root: &Path, config: &ManagedProjectConfig, state:
             state.current_focus = "冷却并准备下一轮".to_string();
             state.current_objective = "结束当前小循环，回到 plan".to_string();
             state.last_summary = "已完成 cooldown，下一轮重新进入 plan".to_string();
+            state.pending_confirmation.retain(|item| !item.contains("轮汇报点"));
             state.stage = AutopilotStage::Plan;
             refresh_dynamic_suggestions(root, config, state)?;
         }
@@ -247,14 +254,14 @@ pub fn run_minimal_cycle_step(root: &Path, config: &ManagedProjectConfig, state:
             state.current_focus = "解除阻塞".to_string();
             state.current_objective = if state.blocked_reason.is_empty() { "先识别阻塞，再回到 plan".to_string() } else { format!("先处理阻塞原因：{}", state.blocked_reason) };
             state.last_summary = "blocked 已切回 plan，等待恢复推进".to_string();
-            state.pending_confirmation.push(format!("blocked 解除前请确认：{}", if state.blocked_reason.is_empty() { "当前阻塞原因未填写" } else { &state.blocked_reason }));
+            push_confirmation_once(state, format!("blocked 解除前请确认：{}", if state.blocked_reason.is_empty() { "当前阻塞原因未填写" } else { &state.blocked_reason }));
             state.stage = AutopilotStage::Plan;
             refresh_dynamic_suggestions(root, config, state)?;
         }
     }
     state.loop_iteration += 1;
     if state.loop_iteration > 0 && state.loop_iteration % config.report_every_rounds == 0 {
-        state.pending_confirmation.push(format!("已达到第 {} 轮汇报点，建议向用户汇报当前进展", state.loop_iteration));
+        push_confirmation_once(state, format!("已达到第 {} 轮汇报点，建议向用户汇报当前进展", state.loop_iteration));
         state.next_report_at = state.loop_iteration + config.report_every_rounds;
     }
     Ok(())
@@ -276,35 +283,16 @@ fn execute_suggestion(root: &Path, config: &ManagedProjectConfig, state: &Manage
     match suggestion.kind {
         WorkflowSuggestionKind::DocSync => {
             let note = sync_project_docs(root, config)?;
-            Ok(WorkflowActionRecord {
-                title: suggestion.title.clone(),
-                kind: suggestion.kind,
-                status: "doc_synced".to_string(),
-                note,
-            })
+            Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "doc_synced".to_string(), note })
         }
         WorkflowSuggestionKind::Collect => {
             let note = collect_project_snapshot(root, config, state)?;
-            Ok(WorkflowActionRecord {
-                title: suggestion.title.clone(),
-                kind: suggestion.kind,
-                status: "collected".to_string(),
-                note,
-            })
+            Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "collected".to_string(), note })
         }
         _ => {
-            append_execution_log(root, &[WorkflowActionRecord {
-                title: suggestion.title.clone(),
-                kind: suggestion.kind,
-                status: "logged".to_string(),
-                note: format!("已执行最小真实动作：将建议写入 EXECUTION_LOG.md；原因：{}", suggestion.rationale),
-            }])?;
-            Ok(WorkflowActionRecord {
-                title: suggestion.title.clone(),
-                kind: suggestion.kind,
-                status: "logged".to_string(),
-                note: format!("已执行最小真实动作：将建议写入 EXECUTION_LOG.md；原因：{}", suggestion.rationale),
-            })
+            let note = format!("已执行最小真实动作：将建议写入 EXECUTION_LOG.md；原因：{}", suggestion.rationale);
+            append_execution_log(root, &[WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "logged".to_string(), note: note.clone() }])?;
+            Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "logged".to_string(), note })
         }
     }
 }
@@ -340,16 +328,56 @@ fn collect_project_snapshot(root: &Path, config: &ManagedProjectConfig, state: &
     Ok("已采集 git/status 文档快照并写入 reports/<project>-snapshot.json".to_string())
 }
 
-fn run_commit_guarded(root: &Path, state: &mut ManagedProjectState) -> Result<String> {
+fn run_commit_guarded(root: &Path, config: &ManagedProjectConfig, state: &mut ManagedProjectState) -> Result<String> {
     let status = run_capture(root, "git", &["status", "--short"])?;
     if status.trim().is_empty() {
         return Ok("commit_push 跳过：当前没有待提交改动".to_string());
     }
-    run_status(root, "git", &["add", "."])?;
-    let message = format!("Autopilot checkpoint at iteration {}", state.loop_iteration);
-    run_status(root, "git", &["commit", "-m", &message])?;
-    state.pending_confirmation.push("已完成本地 commit；若需要 push，请人工确认外发".to_string());
-    Ok(format!("已完成本地 commit：{}；push 仍受人工确认门控", message))
+
+    match evaluate_confirmation_strategy(config, StrategyDecision::RequireConfirmation(ConfirmationPolicy::ExternalPush)) {
+        StrategyDecision::AutoProceed => {
+            run_status(root, "git", &["add", "."])?;
+            let message = format!("Autopilot checkpoint at iteration {}", state.loop_iteration);
+            run_status(root, "git", &["commit", "-m", &message])?;
+            push_confirmation_once(state, "已完成本地 commit；若需要 push，请人工确认外发".to_string());
+            Ok(format!("已完成本地 commit：{}；push 仍受人工确认门控", message))
+        }
+        StrategyDecision::RequireConfirmation(policy) => {
+            let note = confirmation_message(policy, "检测到待提交改动；根据策略层，push 仍需人工确认，本轮不自动外发");
+            push_confirmation_once(state, note.clone());
+            Ok("策略层阻止自动 push；当前仅保留本地待提交改动与确认提示".to_string())
+        }
+    }
+}
+
+fn evaluate_confirmation_strategy(config: &ManagedProjectConfig, desired: StrategyDecision) -> StrategyDecision {
+    match desired {
+        StrategyDecision::AutoProceed => StrategyDecision::AutoProceed,
+        StrategyDecision::RequireConfirmation(policy) => {
+            if config.confirmation_points.contains(&policy) {
+                StrategyDecision::RequireConfirmation(policy)
+            } else {
+                StrategyDecision::AutoProceed
+            }
+        }
+    }
+}
+
+fn confirmation_message(policy: ConfirmationPolicy, detail: &str) -> String {
+    let label = match policy {
+        ConfirmationPolicy::ArchitectureDecision => "architecture_decision",
+        ConfirmationPolicy::ExternalPush => "external_push",
+        ConfirmationPolicy::DestructiveChange => "destructive_change",
+        ConfirmationPolicy::HeavyInstall => "heavy_install",
+        ConfirmationPolicy::RepeatedFailure => "repeated_failure",
+    };
+    format!("需要人工确认（{}）：{}", label, detail)
+}
+
+fn push_confirmation_once(state: &mut ManagedProjectState, message: String) {
+    if !state.pending_confirmation.iter().any(|item| item == &message) {
+        state.pending_confirmation.push(message);
+    }
 }
 
 fn run_capture(root: &Path, program: &str, args: &[&str]) -> Result<String> {
@@ -369,14 +397,10 @@ fn run_status(root: &Path, program: &str, args: &[&str]) -> Result<()> {
 }
 
 fn append_execution_log(root: &Path, entries: &[WorkflowActionRecord]) -> Result<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
+    if entries.is_empty() { return Ok(()); }
     let path = root.join("EXECUTION_LOG.md");
     let mut existing = if path.exists() { fs::read_to_string(&path)? } else { String::new() };
-    if !existing.ends_with('\n') {
-        existing.push('\n');
-    }
+    if !existing.ends_with('\n') { existing.push('\n'); }
     existing.push_str("\n## Autopilot Workflow Action Dispatch\n\n");
     for entry in entries {
         existing.push_str(&format!("- {} [{}]: {}\n", entry.title, kind_name(entry.kind), entry.note));
@@ -404,9 +428,9 @@ fn kind_name(kind: WorkflowSuggestionKind) -> &'static str {
 }
 
 pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> Result<Option<WorkflowReport>> {
-    let trigger = if state.pending_confirmation.iter().any(|s| s.contains("第 ") && s.contains("轮汇报点")) {
+    let trigger = if state.pending_confirmation.iter().any(|s| s.contains("轮汇报点")) {
         Some("every_ten_rounds")
-    } else if state.pending_confirmation.iter().any(|s| s.contains("push")) {
+    } else if state.pending_confirmation.iter().any(|s| s.contains("external_push")) {
         Some("ready_to_push")
     } else if state.pending_confirmation.iter().any(|s| s.contains("blocked")) {
         Some("blocked")
@@ -416,10 +440,7 @@ pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> 
         None
     };
 
-    let Some(trigger) = trigger else {
-        return Ok(None);
-    };
-
+    let Some(trigger) = trigger else { return Ok(None); };
     let report = WorkflowReport {
         project_id: project_id.to_string(),
         trigger: trigger.to_string(),
@@ -429,43 +450,32 @@ pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> 
         focus: state.current_focus.clone(),
         confirmations: state.pending_confirmation.clone(),
     };
-
     let path = PathBuf::from("reports").join(format!("{}-latest.json", project_id));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
     fs::write(&path, serde_json::to_string_pretty(&report)?)?;
     Ok(Some(report))
 }
 
 pub fn render_report_message(report: &WorkflowReport) -> String {
     let mut out = format!(
-        "项目：{}
-触发：{}
-轮次：{}
-阶段：{}
-摘要：{}
-焦点：{}",
+        "项目：{}\n触发：{}\n轮次：{}\n阶段：{}\n摘要：{}\n焦点：{}",
         report.project_id, report.trigger, report.iteration, report.stage, report.summary, report.focus
     );
     if !report.confirmations.is_empty() {
-        out.push_str("
-需确认：");
+        out.push_str("\n需确认：");
         for item in &report.confirmations {
-            out.push_str(&format!("
-- {}", item));
+            out.push_str(&format!("\n- {}", item));
         }
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
     use std::fs;
-    use crate::{ConfirmationPolicy, ManagedProjectConfig, ManagedProjectState, ReportPolicy};
+    use crate::{ManagedProjectConfig, ManagedProjectState, ReportPolicy};
 
     fn sample_config(root: &Path) -> ManagedProjectConfig {
         ManagedProjectConfig {
@@ -509,8 +519,7 @@ mod tests {
         fs::write(dir.path().join("VISION.md"), "artifact").unwrap();
         fs::write(dir.path().join("CURRENT_DIRECTION.md"), "trust score verify 文档").unwrap();
         fs::write(dir.path().join("TODO.md"), "同步 CURRENT_* 口径").unwrap();
-        fs::write(dir.path().join("STATUS.md"), "# STATUS
-").unwrap();
+        fs::write(dir.path().join("STATUS.md"), "# STATUS\n").unwrap();
         let config = sample_config(dir.path());
         let mut state = sample_state();
         run_minimal_cycle_step(dir.path(), &config, &mut state).unwrap();
@@ -538,5 +547,21 @@ mod tests {
         let msg = render_report_message(&report);
         assert!(msg.contains("项目：demo"));
         assert!(msg.contains("需确认"));
+    }
+
+    #[test]
+    fn external_push_confirmation_is_enforced_by_strategy() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("VISION.md"), "artifact").unwrap();
+        fs::write(dir.path().join("CURRENT_DIRECTION.md"), "trust score verify 文档").unwrap();
+        fs::write(dir.path().join("TODO.md"), "同步 CURRENT_* 口径").unwrap();
+        fs::write(dir.path().join("STATUS.md"), "# STATUS\n").unwrap();
+        let config = sample_config(dir.path());
+        let mut state = sample_state();
+        std::process::Command::new("git").current_dir(dir.path()).args(["init"]).status().unwrap();
+        fs::write(dir.path().join("dirty.txt"), "x").unwrap();
+        let result = run_commit_guarded(dir.path(), &config, &mut state).unwrap();
+        assert!(result.contains("阻止自动 push") || result.contains("当前仅保留本地待提交改动"));
+        assert!(state.pending_confirmation.iter().any(|v| v.contains("external_push")));
     }
 }

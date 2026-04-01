@@ -16,7 +16,7 @@ enum ReportPolicy {
     Hybrid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ConfirmationPolicy {
     ArchitectureDecision,
