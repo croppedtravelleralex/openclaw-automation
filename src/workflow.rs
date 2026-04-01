@@ -89,6 +89,7 @@ pub enum ActionFailurePolicy {
     RequireHuman,
     Skip,
     Fallback,
+    Degrade,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -620,6 +621,10 @@ fn run_action_plan(root: &Path, config: &ManagedProjectConfig, state: &ManagedPr
                         } else {
                             notes.push(format!("fallback_after_failure:{}", err));
                         }
+                    }
+                    ActionFailurePolicy::Degrade => {
+                        let degraded = collect_project_snapshot(root, config, state)?;
+                        notes.push(format!("degrade_after_failure:{} => {}", err, degraded));
                     }
                     ActionFailurePolicy::RequireHuman | ActionFailurePolicy::BlockProject => return Err(err),
                 }
@@ -1341,6 +1346,39 @@ edition = "2021"
         let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
         assert!(record.note.contains("fallback_after_failure"));
         assert!(dir.path().join("fallback.txt").exists());
+    }
+
+    #[test]
+    fn action_plan_can_degrade_on_failure_without_blocking() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("STATUS.md"), "# STATUS
+").unwrap();
+        let config = sample_config(dir.path());
+        let state = sample_state();
+        let suggestion = WorkflowSuggestion {
+            title: "执行建议第 1 项".to_string(),
+            priority: 1,
+            rationale: "feature".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let plan = ActionPlan {
+            id: "degrade-plan".to_string(),
+            title: suggestion.title.clone(),
+            trigger: "feature".to_string(),
+            nodes: vec![ActionNode {
+                id: "n1".to_string(),
+                title: "shell".to_string(),
+                executor: ActionExecutor::Shell,
+                command: "printf no-match".to_string(),
+                verify: Some(ActionVerifySpec { mode: VerifyMode::StdoutContains, expected: vec!["expected".to_string()] }),
+                retry: RetryPolicy { max_attempts: 1 },
+                rollback: None,
+                fallback: None,
+                on_fail: ActionFailurePolicy::Degrade,
+            }],
+        };
+        let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
+        assert!(record.note.contains("degrade_after_failure"));
     }
 
     #[test]
