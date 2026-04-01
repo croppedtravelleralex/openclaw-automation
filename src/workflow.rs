@@ -53,6 +53,85 @@ pub struct WorkflowReport {
     pub confirmations: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionPlan {
+    pub id: String,
+    pub title: String,
+    pub trigger: String,
+    pub nodes: Vec<ActionNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionNode {
+    pub id: String,
+    pub title: String,
+    pub executor: ActionExecutor,
+    pub command: String,
+    pub on_fail: ActionFailurePolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionExecutor {
+    Shell,
+    InternalDocSync,
+    InternalCollect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionFailurePolicy {
+    BlockProject,
+    RequireHuman,
+    Skip,
+}
+
+pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> Option<ActionPlan> {
+    if let Some(command) = configured_command_for_suggestion(config, suggestion) {
+        return Some(ActionPlan {
+            id: format!("plan-{}", suggestion.title),
+            title: suggestion.title.clone(),
+            trigger: kind_name(suggestion.kind).to_string(),
+            nodes: vec![ActionNode {
+                id: "node-1".to_string(),
+                title: suggestion.title.clone(),
+                executor: ActionExecutor::Shell,
+                command: command.to_string(),
+                on_fail: ActionFailurePolicy::BlockProject,
+            }],
+        });
+    }
+
+    match suggestion.kind {
+        WorkflowSuggestionKind::DocSync => Some(ActionPlan {
+            id: format!("plan-{}", suggestion.title),
+            title: suggestion.title.clone(),
+            trigger: "doc_sync".to_string(),
+            nodes: vec![ActionNode {
+                id: "node-1".to_string(),
+                title: suggestion.title.clone(),
+                executor: ActionExecutor::InternalDocSync,
+                command: String::new(),
+                on_fail: ActionFailurePolicy::RequireHuman,
+            }],
+        }),
+        WorkflowSuggestionKind::Collect => Some(ActionPlan {
+            id: format!("plan-{}", suggestion.title),
+            title: suggestion.title.clone(),
+            trigger: "collect".to_string(),
+            nodes: vec![ActionNode {
+                id: "node-1".to_string(),
+                title: suggestion.title.clone(),
+                executor: ActionExecutor::InternalCollect,
+                command: String::new(),
+                on_fail: ActionFailurePolicy::RequireHuman,
+            }],
+        }),
+        _ => None,
+    }
+}
+
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -389,23 +468,55 @@ pub fn tick_project(project_id: &str) -> Result<(ManagedProjectState, Option<Wor
     Ok((state, report))
 }
 
+fn run_action_plan(root: &Path, config: &ManagedProjectConfig, state: &ManagedProjectState, suggestion: &WorkflowSuggestion, plan: &ActionPlan) -> Result<WorkflowActionRecord> {
+    let mut notes = Vec::new();
+    for node in &plan.nodes {
+        match node.executor {
+            ActionExecutor::Shell => {
+                let stdout = run_shell_command(root, &node.command)?;
+                if stdout.is_empty() {
+                    notes.push(format!("shell:{}", node.command));
+                } else {
+                    notes.push(format!("shell:{} => {}", node.command, stdout.lines().take(2).collect::<Vec<_>>().join(" | ")));
+                }
+            }
+            ActionExecutor::InternalDocSync => {
+                notes.push(sync_project_docs(root, config)?);
+            }
+            ActionExecutor::InternalCollect => {
+                notes.push(collect_project_snapshot(root, config, state)?);
+            }
+        }
+    }
+    let note = notes.join(" ; ");
+    append_execution_log(root, &[WorkflowActionRecord {
+        title: suggestion.title.clone(),
+        kind: suggestion.kind,
+        status: "executed_via_plan".to_string(),
+        note: note.clone(),
+    }])?;
+    Ok(WorkflowActionRecord {
+        title: suggestion.title.clone(),
+        kind: suggestion.kind,
+        status: "executed_via_plan".to_string(),
+        note,
+    })
+}
+
 fn run_structured_action(root: &Path, config: &ManagedProjectConfig, state: &ManagedProjectState, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
+    if let Some(plan) = action_plan_from_suggestion(config, suggestion) {
+        return run_action_plan(root, config, state, suggestion, &plan);
+    }
     match suggestion.kind {
-        WorkflowSuggestionKind::DocSync => {
-            let note = sync_project_docs(root, config)?;
-            Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "doc_synced".to_string(), note })
-        }
-        WorkflowSuggestionKind::Collect => {
-            let note = collect_project_snapshot(root, config, state)?;
-            Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "collected".to_string(), note })
-        }
         WorkflowSuggestionKind::Test => run_test_action(root, suggestion),
         WorkflowSuggestionKind::Commit => run_commit_check_action(root, suggestion),
         WorkflowSuggestionKind::Feature
         | WorkflowSuggestionKind::BugScan
         | WorkflowSuggestionKind::BugFix
+        | WorkflowSuggestionKind::DocSync
         | WorkflowSuggestionKind::Refactor
-        | WorkflowSuggestionKind::Performance => run_configured_or_plan_action(root, config, suggestion),
+        | WorkflowSuggestionKind::Performance
+        | WorkflowSuggestionKind::Collect => run_plan_record_action(root, suggestion),
     }
 }
 
@@ -858,6 +969,38 @@ edition = "2021"
         let record = run_configured_or_plan_action(dir.path(), &config, &suggestion).unwrap();
         assert_eq!(record.status, "executed");
         assert_eq!(fs::read_to_string(dir.path().join("winner.txt")).unwrap(), "title");
+    }
+
+    #[test]
+    fn action_plan_can_be_built_from_feature_command_mapping() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(dir.path());
+        config.action_commands.insert("feature".to_string(), "printf hi".to_string());
+        let suggestion = WorkflowSuggestion {
+            title: "执行建议第 1 项".to_string(),
+            priority: 1,
+            rationale: "feature".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let plan = action_plan_from_suggestion(&config, &suggestion).unwrap();
+        assert_eq!(plan.nodes.len(), 1);
+        assert_eq!(plan.nodes[0].executor, ActionExecutor::Shell);
+    }
+
+    #[test]
+    fn action_plan_runner_executes_internal_docsync() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path());
+        let state = sample_state();
+        let suggestion = WorkflowSuggestion {
+            title: "同步 TODO/STATUS/PROGRESS".to_string(),
+            priority: 1,
+            rationale: "doc".to_string(),
+            kind: WorkflowSuggestionKind::DocSync,
+        };
+        let plan = action_plan_from_suggestion(&config, &suggestion).unwrap();
+        let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
+        assert_eq!(record.status, "executed_via_plan");
     }
 
     #[test]
