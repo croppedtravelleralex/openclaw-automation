@@ -353,7 +353,7 @@ pub fn tick_project(project_id: &str) -> Result<(ManagedProjectState, Option<Wor
     Ok((state, report))
 }
 
-fn execute_suggestion(root: &Path, config: &ManagedProjectConfig, state: &ManagedProjectState, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
+fn run_structured_action(root: &Path, config: &ManagedProjectConfig, state: &ManagedProjectState, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
     match suggestion.kind {
         WorkflowSuggestionKind::DocSync => {
             let note = sync_project_docs(root, config)?;
@@ -363,12 +363,52 @@ fn execute_suggestion(root: &Path, config: &ManagedProjectConfig, state: &Manage
             let note = collect_project_snapshot(root, config, state)?;
             Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "collected".to_string(), note })
         }
-        _ => {
-            let note = format!("已执行最小真实动作：将建议写入 EXECUTION_LOG.md；原因：{}", suggestion.rationale);
-            append_execution_log(root, &[WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "logged".to_string(), note: note.clone() }])?;
-            Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "logged".to_string(), note })
-        }
+        WorkflowSuggestionKind::Test => run_test_action(root, suggestion),
+        WorkflowSuggestionKind::Commit => run_commit_check_action(root, suggestion),
+        WorkflowSuggestionKind::Feature
+        | WorkflowSuggestionKind::BugScan
+        | WorkflowSuggestionKind::BugFix
+        | WorkflowSuggestionKind::Refactor
+        | WorkflowSuggestionKind::Performance => run_plan_record_action(root, suggestion),
     }
+}
+
+fn run_test_action(root: &Path, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
+    if root.join("Cargo.toml").exists() {
+        run_status(root, "cargo", &["test", "-q"])?;
+        Ok(WorkflowActionRecord {
+            title: suggestion.title.clone(),
+            kind: suggestion.kind,
+            status: "tested".to_string(),
+            note: "已执行 cargo test -q 并通过".to_string(),
+        })
+    } else {
+        let note = "未发现 Cargo.toml，跳过测试执行并记日志".to_string();
+        append_execution_log(root, &[WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "test_skipped".to_string(), note: note.clone() }])?;
+        Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "test_skipped".to_string(), note })
+    }
+}
+
+fn run_commit_check_action(root: &Path, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
+    let status = run_capture(root, "git", &["status", "--short"])?;
+    let trimmed = status.trim();
+    let note = if trimmed.is_empty() {
+        "git 工作区干净；当前无需 commit".to_string()
+    } else {
+        format!("检测到待提交改动：{}", trimmed.lines().take(5).collect::<Vec<_>>().join(" | "))
+    };
+    append_execution_log(root, &[WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "commit_checked".to_string(), note: note.clone() }])?;
+    Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "commit_checked".to_string(), note })
+}
+
+fn run_plan_record_action(root: &Path, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
+    let note = format!("已记录结构化执行计划：{}；原因：{}", suggestion.title, suggestion.rationale);
+    append_execution_log(root, &[WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "planned".to_string(), note: note.clone() }])?;
+    Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "planned".to_string(), note })
+}
+
+fn execute_suggestion(root: &Path, config: &ManagedProjectConfig, state: &ManagedProjectState, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
+    run_structured_action(root, config, state, suggestion)
 }
 
 fn sync_project_docs(root: &Path, config: &ManagedProjectConfig) -> Result<String> {
@@ -666,6 +706,61 @@ mod tests {
         state.cooldown_until_ms = 5_000;
         assert!(should_wait_for_cooldown(&state, 4_000));
         assert!(!should_wait_for_cooldown(&state, 5_000));
+    }
+
+    #[test]
+    fn structured_test_action_runs_for_rust_project() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+"#,
+        ).unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}
+").unwrap();
+        let suggestion = WorkflowSuggestion {
+            title: "补最小必要测试".to_string(),
+            priority: 1,
+            rationale: "test".to_string(),
+            kind: WorkflowSuggestionKind::Test,
+        };
+        let record = run_test_action(dir.path(), &suggestion).unwrap();
+        assert_eq!(record.status, "tested");
+    }
+
+    #[test]
+    fn structured_commit_action_reports_dirty_workspace() {
+        let dir = tempdir().expect("tempdir");
+        std::process::Command::new("git").current_dir(dir.path()).args(["init"]).status().unwrap();
+        fs::write(dir.path().join("dirty.txt"), "x").unwrap();
+        let suggestion = WorkflowSuggestion {
+            title: "评估是否 push".to_string(),
+            priority: 1,
+            rationale: "commit".to_string(),
+            kind: WorkflowSuggestionKind::Commit,
+        };
+        let record = run_commit_check_action(dir.path(), &suggestion).unwrap();
+        assert_eq!(record.status, "commit_checked");
+        assert!(record.note.contains("dirty.txt"));
+    }
+
+    #[test]
+    fn structured_feature_action_writes_planned_log() {
+        let dir = tempdir().expect("tempdir");
+        let suggestion = WorkflowSuggestion {
+            title: "继续推进 trust score 核心化".to_string(),
+            priority: 1,
+            rationale: "because".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let record = run_plan_record_action(dir.path(), &suggestion).unwrap();
+        assert_eq!(record.status, "planned");
+        let log = fs::read_to_string(dir.path().join("EXECUTION_LOG.md")).unwrap();
+        assert!(log.contains("结构化执行计划"));
     }
 
     #[test]
