@@ -405,7 +405,26 @@ fn run_structured_action(root: &Path, config: &ManagedProjectConfig, state: &Man
         | WorkflowSuggestionKind::BugScan
         | WorkflowSuggestionKind::BugFix
         | WorkflowSuggestionKind::Refactor
-        | WorkflowSuggestionKind::Performance => run_plan_record_action(root, suggestion),
+        | WorkflowSuggestionKind::Performance => run_configured_or_plan_action(root, config, suggestion),
+    }
+}
+
+fn configured_command_for_kind<'a>(config: &'a ManagedProjectConfig, kind: WorkflowSuggestionKind) -> Option<&'a str> {
+    config.action_commands.get(kind_name(kind)).map(|s| s.as_str())
+}
+
+fn run_shell_command(root: &Path, command: &str) -> Result<()> {
+    run_status(root, "bash", &["-lc", command])
+}
+
+fn run_configured_or_plan_action(root: &Path, config: &ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
+    if let Some(command) = configured_command_for_kind(config, suggestion.kind) {
+        run_shell_command(root, command)?;
+        let note = format!("已执行配置命令：{}", command);
+        append_execution_log(root, &[WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "executed".to_string(), note: note.clone() }])?;
+        Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "executed".to_string(), note })
+    } else {
+        run_plan_record_action(root, suggestion)
     }
 }
 
@@ -651,6 +670,7 @@ mod tests {
             todo_path: "TODO.md".to_string(),
             status_path: "STATUS.md".to_string(),
             progress_path: "PROGRESS.md".to_string(),
+            action_commands: std::collections::BTreeMap::new(),
         }
     }
 
@@ -801,6 +821,57 @@ edition = "2021"
         let record = run_commit_check_action(dir.path(), &suggestion).unwrap();
         assert_eq!(record.status, "commit_checked");
         assert!(record.note.contains("dirty.txt"));
+    }
+
+    #[test]
+    fn configured_feature_action_executes_shell_command() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(dir.path());
+        config.action_commands.insert("feature".to_string(), "printf executed > feature.txt".to_string());
+        let suggestion = WorkflowSuggestion {
+            title: "执行建议第 1 项".to_string(),
+            priority: 1,
+            rationale: "feature".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let record = run_configured_or_plan_action(dir.path(), &config, &suggestion).unwrap();
+        assert_eq!(record.status, "executed");
+        assert_eq!(fs::read_to_string(dir.path().join("feature.txt")).unwrap(), "executed");
+    }
+
+    #[test]
+    fn paused_tick_does_not_advance_iteration() {
+        let mut state = sample_state();
+        state.paused = true;
+        let before = state.loop_iteration;
+        let now_ms_value = now_ms();
+        if state.paused {
+            let hold_reason = if state.manual_hold_reason.is_empty() { String::new() } else { format!("（manual hold：{}）", state.manual_hold_reason) };
+            state.last_summary = format!("autopilot 当前已暂停{}，跳过本轮 tick", hold_reason);
+            state.current_focus = "等待恢复运行".to_string();
+            state.current_objective = "人工取消 paused/hold 后再继续自动推进".to_string();
+        } else if should_wait_for_cooldown(&state, now_ms_value) {
+            unreachable!();
+        }
+        assert_eq!(state.loop_iteration, before);
+    }
+
+    #[test]
+    fn cooldown_tick_does_not_advance_iteration() {
+        let mut state = sample_state();
+        state.cooldown_until_ms = now_ms() + 60_000;
+        let before = state.loop_iteration;
+        let now_ms_value = now_ms();
+        if state.paused {
+            unreachable!();
+        } else if should_wait_for_cooldown(&state, now_ms_value) {
+            let remain_ms = state.cooldown_until_ms.saturating_sub(now_ms_value);
+            state.last_summary = format!("仍在冷却中，{} 秒后再自动重试", remain_ms / 1000);
+            state.current_focus = "冷却等待".to_string();
+            state.current_objective = "跳过本轮执行，等待 backoff 窗口结束".to_string();
+        }
+        assert_eq!(state.loop_iteration, before);
+        assert!(state.last_summary.contains("冷却中"));
     }
 
     #[test]

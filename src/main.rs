@@ -1,4 +1,4 @@
-use std::{env, fs, path::Path, time::Duration};
+use std::{collections::BTreeMap, env, fs, path::Path, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,7 @@ struct ManagedProjectConfig {
     todo_path: String,
     status_path: String,
     progress_path: String,
+    action_commands: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,6 +139,7 @@ fn init_skeleton() -> Result<()> {
         todo_path: "TODO.md".to_string(),
         status_path: "STATUS.md".to_string(),
         progress_path: "PROGRESS.md".to_string(),
+        action_commands: BTreeMap::new(),
     };
     let state = ManagedProjectState {
         project_id: "lightpanda-automation".to_string(),
@@ -186,7 +188,16 @@ fn show_status(project_id: &str) -> Result<()> {
     println!("iteration: {}", state.loop_iteration);
     println!("paused: {}", state.paused);
     println!("manual_hold_reason: {}", if state.manual_hold_reason.is_empty() { "<none>" } else { &state.manual_hold_reason });
+    let cooldown_remaining = if state.cooldown_until_ms > 0 {
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        state.cooldown_until_ms.saturating_sub(now_ms) / 1000
+    } else { 0 };
     println!("consecutive_failures: {}", state.consecutive_failures);
+    println!("cooldown_remaining_seconds: {}", cooldown_remaining);
+    println!("pending_confirmations: {}", state.pending_confirmation.len());
+    for item in state.pending_confirmation.iter().take(5) {
+        println!("- {}", item);
+    }
     println!("last_error_category: {}", if state.last_error_category.is_empty() { "<none>" } else { &state.last_error_category });
     println!("recovery_hint: {}", if state.recovery_hint.is_empty() { "<none>" } else { &state.recovery_hint });
     println!("last_summary: {}", state.last_summary);
@@ -334,7 +345,7 @@ fn write_docs() -> Result<()> {
 - 独立 workflow 内核
 - 周期 tick / daemon
 - pause / resume / manual hold 控制面
-- status 运行态查询
+- status 运行态查询（含 cooldown / pending confirmations）
 - 每 10 次 + 关键事件报告
 - 文档同步动作
 - 数据采集动作
