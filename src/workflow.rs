@@ -137,6 +137,10 @@ pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &W
                 ActionFailurePolicy::Skip,
                 None,
             ),
+            "治理高并发写放大与状态竞争" => (
+                ActionFailurePolicy::Degrade,
+                None,
+            ),
             _ => (
                 ActionFailurePolicy::BlockProject,
                 None,
@@ -1218,6 +1222,24 @@ edition = "2021"
         let plan = action_plan_from_suggestion(&config, &suggestion).unwrap();
         assert_eq!(plan.nodes[0].on_fail, ActionFailurePolicy::Fallback);
         assert!(plan.nodes[0].fallback.is_some());
+    }
+
+    #[test]
+    fn write_amplification_suggestion_uses_degrade_policy() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(dir.path());
+        config.action_command_overrides.insert(
+            "治理高并发写放大与状态竞争".to_string(),
+            "printf write-amplification".to_string(),
+        );
+        let suggestion = WorkflowSuggestion {
+            title: "治理高并发写放大与状态竞争".to_string(),
+            priority: 1,
+            rationale: "perf".to_string(),
+            kind: WorkflowSuggestionKind::Performance,
+        };
+        let plan = action_plan_from_suggestion(&config, &suggestion).unwrap();
+        assert_eq!(plan.nodes[0].on_fail, ActionFailurePolicy::Degrade);
     }
 
     #[test]
