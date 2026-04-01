@@ -70,6 +70,7 @@ pub struct ActionNode {
     pub verify: Option<ActionVerifySpec>,
     pub retry: RetryPolicy,
     pub rollback: Option<ActionRollbackSpec>,
+    pub fallback: Option<ActionFallbackSpec>,
     pub on_fail: ActionFailurePolicy,
 }
 
@@ -109,6 +110,12 @@ pub struct RetryPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionFallbackSpec {
+    pub executor: ActionExecutor,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActionRollbackSpec {
     pub executor: ActionExecutor,
     pub command: String,
@@ -129,6 +136,7 @@ pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &W
                 verify: Some(ActionVerifySpec { mode: VerifyMode::ExitCodeZero, expected: Vec::new() }),
                 retry: RetryPolicy { max_attempts: 2 },
                 rollback: None,
+                fallback: None,
                 on_fail: ActionFailurePolicy::BlockProject,
             }],
         });
@@ -147,6 +155,7 @@ pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &W
                 verify: None,
                 retry: RetryPolicy { max_attempts: 1 },
                 rollback: None,
+                fallback: None,
                 on_fail: ActionFailurePolicy::RequireHuman,
             }],
         }),
@@ -162,6 +171,7 @@ pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &W
                 verify: None,
                 retry: RetryPolicy { max_attempts: 1 },
                 rollback: None,
+                fallback: None,
                 on_fail: ActionFailurePolicy::RequireHuman,
             }],
         }),
@@ -570,7 +580,30 @@ fn run_action_plan(root: &Path, config: &ManagedProjectConfig, state: &ManagedPr
             if let Some(err) = last_err {
                 match node.on_fail {
                     ActionFailurePolicy::Skip => notes.push(format!("skip_after_failure:{}", err)),
-                    ActionFailurePolicy::Fallback => notes.push(format!("fallback_after_failure:{}", err)),
+                    ActionFailurePolicy::Fallback => {
+                        if let Some(fallback) = &node.fallback {
+                            match fallback.executor {
+                                ActionExecutor::Shell => {
+                                    let fb = run_shell_command(root, &fallback.command)?;
+                                    if fb.is_empty() {
+                                        notes.push(format!("fallback_after_failure:{} => {}", err, fallback.command));
+                                    } else {
+                                        notes.push(format!("fallback_after_failure:{} => {} => {}", err, fallback.command, fb));
+                                    }
+                                }
+                                ActionExecutor::InternalDocSync => {
+                                    let fb = sync_project_docs(root, config)?;
+                                    notes.push(format!("fallback_after_failure:{} => {}", err, fb));
+                                }
+                                ActionExecutor::InternalCollect => {
+                                    let fb = collect_project_snapshot(root, config, state)?;
+                                    notes.push(format!("fallback_after_failure:{} => {}", err, fb));
+                                }
+                            }
+                        } else {
+                            notes.push(format!("fallback_after_failure:{}", err));
+                        }
+                    }
                     ActionFailurePolicy::RequireHuman | ActionFailurePolicy::BlockProject => return Err(err),
                 }
             }
@@ -1158,6 +1191,7 @@ edition = "2021"
                 verify: Some(ActionVerifySpec { mode: VerifyMode::StdoutContains, expected: vec!["verified-output".to_string()] }),
                 retry: RetryPolicy { max_attempts: 2 },
                 rollback: None,
+                fallback: None,
                 on_fail: ActionFailurePolicy::BlockProject,
             }],
         };
@@ -1188,6 +1222,7 @@ edition = "2021"
                 verify: Some(ActionVerifySpec { mode: VerifyMode::StdoutContains, expected: vec!["expected".to_string()] }),
                 retry: RetryPolicy { max_attempts: 1 },
                 rollback: None,
+                fallback: None,
                 on_fail: ActionFailurePolicy::Skip,
             }],
         };
@@ -1218,11 +1253,13 @@ edition = "2021"
                 verify: Some(ActionVerifySpec { mode: VerifyMode::StdoutContains, expected: vec!["expected".to_string()] }),
                 retry: RetryPolicy { max_attempts: 1 },
                 rollback: None,
+                fallback: Some(ActionFallbackSpec { executor: ActionExecutor::Shell, command: "printf fallback-ok > fallback.txt".to_string() }),
                 on_fail: ActionFailurePolicy::Fallback,
             }],
         };
         let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
         assert!(record.note.contains("fallback_after_failure"));
+        assert!(dir.path().join("fallback.txt").exists());
     }
 
     #[test]
@@ -1248,6 +1285,7 @@ edition = "2021"
                 verify: Some(ActionVerifySpec { mode: VerifyMode::StdoutContains, expected: vec!["expected".to_string()] }),
                 retry: RetryPolicy { max_attempts: 1 },
                 rollback: Some(ActionRollbackSpec { executor: ActionExecutor::Shell, command: "touch rollback.txt".to_string() }),
+                fallback: None,
                 on_fail: ActionFailurePolicy::RequireHuman,
             }],
         };
