@@ -877,6 +877,29 @@ fn kind_name(kind: WorkflowSuggestionKind) -> &'static str {
     }
 }
 
+fn recovery_summary_from_actions(actions: &[WorkflowActionRecord]) -> Option<String> {
+    let hits = actions
+        .iter()
+        .filter_map(|record| {
+            if record.note.contains("fallback_after_failure") {
+                Some(format!("fallback:{}", record.title))
+            } else if record.note.contains("skip_after_failure") {
+                Some(format!("skip:{}", record.title))
+            } else if record.note.contains("rollback:") {
+                Some(format!("rollback:{}", record.title))
+            } else {
+                None
+            }
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+    if hits.is_empty() {
+        None
+    } else {
+        Some(hits.join(" | "))
+    }
+}
+
 pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> Result<Option<WorkflowReport>> {
     let has_round_report = state.pending_confirmation.iter().any(|s| s.contains("轮汇报点"));
     let has_ready_to_push = state.pending_confirmation.iter().any(|s| s.contains("external_push"));
@@ -900,7 +923,11 @@ pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> 
         trigger: trigger.to_string(),
         iteration: state.loop_iteration,
         stage: format!("{:?}", state.stage),
-        summary: state.last_summary.clone(),
+        summary: if let Some(recovery) = recovery_summary_from_actions(&state.last_executed_actions) {
+            format!("{}；恢复：{}", state.last_summary, recovery)
+        } else {
+            state.last_summary.clone()
+        },
         focus: state.current_focus.clone(),
         confirmations: state.pending_confirmation.clone(),
     };

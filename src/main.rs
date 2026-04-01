@@ -244,6 +244,15 @@ fn show_status(project_id: &str) -> Result<()> {
     println!("last_error_category: {}", if state.last_error_category.is_empty() { "<none>" } else { &state.last_error_category });
     println!("recovery_hint: {}", if state.recovery_hint.is_empty() { "<none>" } else { &state.recovery_hint });
     println!("last_summary: {}", state.last_summary);
+    let recovery_actions = state
+        .last_executed_actions
+        .iter()
+        .filter(|r| r.note.contains("fallback_after_failure") || r.note.contains("skip_after_failure") || r.note.contains("rollback:"))
+        .collect::<Vec<_>>();
+    println!("recent_recovery_actions: {}", recovery_actions.len());
+    for item in recovery_actions.iter().take(5) {
+        println!("- recovery:{} => {}", item.title, item.note);
+    }
     println!("current_focus: {}", state.current_focus);
     println!("current_objective: {}", state.current_objective);
     println!("next_report_at: {}", state.next_report_at);
