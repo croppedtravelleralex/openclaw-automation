@@ -428,11 +428,15 @@ fn kind_name(kind: WorkflowSuggestionKind) -> &'static str {
 }
 
 pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> Result<Option<WorkflowReport>> {
-    let trigger = if state.pending_confirmation.iter().any(|s| s.contains("轮汇报点")) {
+    let has_round_report = state.pending_confirmation.iter().any(|s| s.contains("轮汇报点"));
+    let has_ready_to_push = state.pending_confirmation.iter().any(|s| s.contains("external_push"));
+    let has_blocked = state.pending_confirmation.iter().any(|s| s.contains("blocked"));
+
+    let trigger = if has_round_report {
         Some("every_ten_rounds")
-    } else if state.pending_confirmation.iter().any(|s| s.contains("external_push")) {
+    } else if has_ready_to_push {
         Some("ready_to_push")
-    } else if state.pending_confirmation.iter().any(|s| s.contains("blocked")) {
+    } else if has_blocked {
         Some("blocked")
     } else if !state.pending_confirmation.is_empty() {
         Some("key_event")
@@ -453,6 +457,11 @@ pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> 
     let path = PathBuf::from("reports").join(format!("{}-latest.json", project_id));
     if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
     fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+
+    if has_round_report {
+        state.pending_confirmation.retain(|item| !item.contains("轮汇报点"));
+    }
+
     Ok(Some(report))
 }
 
@@ -547,6 +556,23 @@ mod tests {
         let msg = render_report_message(&report);
         assert!(msg.contains("项目：demo"));
         assert!(msg.contains("需确认"));
+    }
+
+    #[test]
+    fn every_ten_rounds_report_is_emitted_once_and_then_cleared() {
+        let mut state = sample_state();
+        state.loop_iteration = 10;
+        state.stage = crate::AutopilotStage::Verify;
+        state.last_summary = "summary".to_string();
+        state.current_focus = "focus".to_string();
+        state.pending_confirmation.push("已达到第 10 轮汇报点，建议向用户汇报当前进展".to_string());
+
+        let first = maybe_write_report("demo", &mut state).unwrap();
+        assert!(first.is_some());
+        assert!(state.pending_confirmation.iter().all(|v| !v.contains("轮汇报点")));
+
+        let second = maybe_write_report("demo", &mut state).unwrap();
+        assert!(second.is_none());
     }
 
     #[test]
