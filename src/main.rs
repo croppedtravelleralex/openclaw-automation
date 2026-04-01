@@ -72,6 +72,11 @@ struct ManagedProjectState {
     current_objective: String,
     next_suggestions: Vec<WorkflowSuggestion>,
     last_executed_actions: Vec<WorkflowActionRecord>,
+    consecutive_failures: u32,
+    last_error: String,
+    last_failure_at_ms: u64,
+    cooldown_until_ms: u64,
+    paused: bool,
 }
 
 #[tokio::main]
@@ -140,6 +145,11 @@ fn init_skeleton() -> Result<()> {
         current_objective: "初始化独立 autopilot 内核".to_string(),
         next_suggestions: Vec::new(),
         last_executed_actions: Vec::new(),
+        consecutive_failures: 0,
+        last_error: String::new(),
+        last_failure_at_ms: 0,
+        cooldown_until_ms: 0,
+        paused: false,
     };
 
     write_json("configs/lightpanda-automation.json", &config)?;

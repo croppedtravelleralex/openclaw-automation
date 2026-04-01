@@ -1,4 +1,4 @@
-use std::{fs, path::{Path, PathBuf}, process::Command};
+use std::{fs, path::{Path, PathBuf}, process::Command, time::{SystemTime, UNIX_EPOCH}};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,58 @@ pub struct WorkflowReport {
     pub summary: String,
     pub focus: String,
     pub confirmations: Vec<String>,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn compute_backoff_ms(consecutive_failures: u32) -> u64 {
+    let exp = consecutive_failures.saturating_sub(1).min(5);
+    let base = 10_000u64;
+    let factor = 1u64 << exp;
+    (base.saturating_mul(factor)).min(300_000)
+}
+
+fn should_wait_for_cooldown(state: &ManagedProjectState, now_ms_value: u64) -> bool {
+    state.cooldown_until_ms > now_ms_value
+}
+
+fn register_tick_failure(state: &mut ManagedProjectState, err: &anyhow::Error, now_ms_value: u64) {
+    state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    state.last_error = format!("{:#}", err);
+    state.last_failure_at_ms = now_ms_value;
+    let backoff_ms = compute_backoff_ms(state.consecutive_failures);
+    state.cooldown_until_ms = now_ms_value.saturating_add(backoff_ms);
+    state.current_focus = "处理失败与退避冷却".to_string();
+    state.current_objective = "等待冷却结束后自动重试；若连续失败过多则转 blocked".to_string();
+    state.last_summary = format!(
+        "tick 失败，第 {} 次连续失败；已进入 {} 秒冷却",
+        state.consecutive_failures,
+        backoff_ms / 1000
+    );
+
+    if state.consecutive_failures >= 3 {
+        state.stage = AutopilotStage::Blocked;
+        state.blocked_reason = state.last_error.clone();
+        push_confirmation_once(
+            state,
+            confirmation_message(
+                ConfirmationPolicy::RepeatedFailure,
+                &format!("连续失败 {} 次：{}", state.consecutive_failures, state.last_error),
+            ),
+        );
+    }
+}
+
+fn clear_failure_tracking(state: &mut ManagedProjectState) {
+    state.consecutive_failures = 0;
+    state.last_error.clear();
+    state.last_failure_at_ms = 0;
+    state.cooldown_until_ms = 0;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,7 +325,24 @@ pub fn tick_project(project_id: &str) -> Result<(ManagedProjectState, Option<Wor
     let config: ManagedProjectConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     let mut state: ManagedProjectState = serde_json::from_str(&fs::read_to_string(&state_path)?)?;
     let root = PathBuf::from(&config.root);
-    run_minimal_cycle_step(&root, &config, &mut state)?;
+    let now_ms_value = now_ms();
+
+    if state.paused {
+        state.last_summary = "autopilot 当前已暂停，跳过本轮 tick".to_string();
+        state.current_focus = "等待恢复运行".to_string();
+        state.current_objective = "人工取消 paused 后再继续自动推进".to_string();
+    } else if should_wait_for_cooldown(&state, now_ms_value) {
+        let remain_ms = state.cooldown_until_ms.saturating_sub(now_ms_value);
+        state.last_summary = format!("仍在冷却中，{} 秒后再自动重试", remain_ms / 1000);
+        state.current_focus = "冷却等待".to_string();
+        state.current_objective = "跳过本轮执行，等待 backoff 窗口结束".to_string();
+    } else {
+        match run_minimal_cycle_step(&root, &config, &mut state) {
+            Ok(()) => clear_failure_tracking(&mut state),
+            Err(err) => register_tick_failure(&mut state, &err, now_ms_value),
+        }
+    }
+
     let report = maybe_write_report(project_id, &mut state)?;
     fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
     Ok((state, report))
@@ -519,6 +588,11 @@ mod tests {
             current_objective: String::new(),
             next_suggestions: Vec::new(),
             last_executed_actions: Vec::new(),
+            consecutive_failures: 0,
+            last_error: String::new(),
+            last_failure_at_ms: 0,
+            cooldown_until_ms: 0,
+            paused: false,
         }
     }
 
@@ -556,6 +630,36 @@ mod tests {
         let msg = render_report_message(&report);
         assert!(msg.contains("项目：demo"));
         assert!(msg.contains("需确认"));
+    }
+
+    #[test]
+    fn backoff_grows_with_failure_count() {
+        assert_eq!(compute_backoff_ms(1), 10_000);
+        assert_eq!(compute_backoff_ms(2), 20_000);
+        assert_eq!(compute_backoff_ms(3), 40_000);
+    }
+
+    #[test]
+    fn repeated_failures_eventually_block_the_project() {
+        let mut state = sample_state();
+        let err = anyhow::anyhow!("boom");
+        register_tick_failure(&mut state, &err, 1_000);
+        assert_eq!(state.consecutive_failures, 1);
+        assert_eq!(state.stage, crate::AutopilotStage::Plan);
+        assert!(state.cooldown_until_ms > 1_000);
+
+        register_tick_failure(&mut state, &err, 2_000);
+        register_tick_failure(&mut state, &err, 3_000);
+        assert_eq!(state.stage, crate::AutopilotStage::Blocked);
+        assert!(state.pending_confirmation.iter().any(|v| v.contains("repeated_failure")));
+    }
+
+    #[test]
+    fn cooldown_guard_skips_until_window_passes() {
+        let mut state = sample_state();
+        state.cooldown_until_ms = 5_000;
+        assert!(should_wait_for_cooldown(&state, 4_000));
+        assert!(!should_wait_for_cooldown(&state, 5_000));
     }
 
     #[test]

@@ -1,3 +1,5 @@
 target/
 reports/demo-snapshot.json
 reports/demo-latest.json
+reports/*-snapshot.json
+reports/*-latest.json
