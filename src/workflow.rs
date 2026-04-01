@@ -864,17 +864,18 @@ pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> 
 }
 
 pub fn render_report_message(report: &WorkflowReport) -> String {
-    let mut out = format!(
-        "项目：{}\n触发：{}\n轮次：{}\n阶段：{}\n摘要：{}\n焦点：{}",
-        report.project_id, report.trigger, report.iteration, report.stage, report.summary, report.focus
-    );
-    if !report.confirmations.is_empty() {
-        out.push_str("\n需确认：");
-        for item in &report.confirmations {
-            out.push_str(&format!("\n- {}", item));
-        }
+    let mut lines = vec![
+        format!("执行摘要｜{}", report.project_id),
+        format!("第 {} 轮 · {}", report.iteration, report.stage),
+        report.summary.clone(),
+    ];
+    if !report.focus.is_empty() {
+        lines.push(format!("当前：{}", report.focus));
     }
-    out
+    if !report.confirmations.is_empty() {
+        lines.push(format!("确认：{}", report.confirmations.join("；")));
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -1006,8 +1007,8 @@ mod tests {
             confirmations: vec!["please confirm".to_string()],
         };
         let msg = render_report_message(&report);
-        assert!(msg.contains("项目：demo"));
-        assert!(msg.contains("需确认"));
+        assert!(msg.contains("执行摘要｜demo"));
+        assert!(msg.contains("确认：please confirm"));
     }
 
     #[test]
