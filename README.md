@@ -55,3 +55,9 @@
 - edge / condition
 - 更强恢复策略
 - 多项目调度
+
+## 已验证稳定性
+
+- 已通过真实文件链路下 **36 轮** 连续 tick 稳定性测试
+- 当前测试数：**28 个测试通过**
+- 已验证 `config/state -> tick_project -> ActionPlan -> state持久化` 主干可长期循环

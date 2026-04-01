@@ -19,10 +19,10 @@
   "status_path": "STATUS.md",
   "progress_path": "PROGRESS.md",
   "action_commands": {
-    "feature": "printf 'feature tick\\n' >> EXECUTION_LOG.md",
-    "bug_fix": "printf 'bug fix tick\\n' >> EXECUTION_LOG.md"
+    "bug_fix": "cargo test -q"
   },
   "action_command_overrides": {
-    "继续推进 trust score 核心化": "printf 'trust score step\n' >> EXECUTION_LOG.md"
+    "推进 verify / smoke / batch verify 质量闭环": "cargo test -q",
+    "继续推进 trust score 核心化": "printf '[shadow-plan] trust score core queued\\n' >> EXECUTION_LOG.md"
   }
 }

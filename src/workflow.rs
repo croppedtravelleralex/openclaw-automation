@@ -1377,6 +1377,50 @@ edition = "2021"
     }
 
     #[test]
+    fn autopilot_runs_stably_beyond_thirty_iterations() {
+        let _guard = test_cwd_lock().lock().unwrap();
+        let repo = tempdir().expect("tempdir");
+        let project_root = repo.path().join("stable-project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::create_dir_all(repo.path().join("configs")).unwrap();
+        fs::create_dir_all(repo.path().join("state")).unwrap();
+        fs::write(project_root.join("VISION.md"), "artifact").unwrap();
+        fs::write(project_root.join("CURRENT_DIRECTION.md"), "trust score verify 文档").unwrap();
+        fs::write(project_root.join("TODO.md"), "同步 CURRENT_* 口径
+写放大").unwrap();
+        fs::write(project_root.join("STATUS.md"), "# STATUS
+").unwrap();
+        fs::write(project_root.join("PROGRESS.md"), "# PROGRESS
+").unwrap();
+
+        let mut config = sample_config(&project_root);
+        config.id = "stable".to_string();
+        config.root = project_root.display().to_string();
+        config.action_commands.insert("feature".to_string(), "printf stable-run >> stable.log".to_string());
+        config.action_commands.insert("bug_fix".to_string(), "printf fixed >> stable-fix.log".to_string());
+        let state = sample_state();
+        fs::write(repo.path().join("configs/stable.json"), serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        fs::write(repo.path().join("state/stable.json"), serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(repo.path()).unwrap();
+        let mut last_state = None;
+        for _ in 0..36 {
+            let (state, _) = tick_project("stable").unwrap();
+            assert_ne!(state.stage, crate::AutopilotStage::Blocked);
+            last_state = Some(state);
+        }
+        std::env::set_current_dir(prev).unwrap();
+
+        let final_state = last_state.unwrap();
+        assert!(final_state.loop_iteration >= 36);
+        assert!(project_root.join("stable.log").exists());
+        let persisted: crate::ManagedProjectState = serde_json::from_str(&fs::read_to_string(repo.path().join("state/stable.json")).unwrap()).unwrap();
+        assert_eq!(persisted.loop_iteration, final_state.loop_iteration);
+        assert!(persisted.pending_confirmation.iter().any(|v| v.contains("轮汇报点")) || persisted.next_report_at >= 40);
+    }
+
+    #[test]
     fn external_push_confirmation_is_enforced_by_strategy() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("VISION.md"), "artifact").unwrap();
