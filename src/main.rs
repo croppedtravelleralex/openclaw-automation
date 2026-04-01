@@ -77,6 +77,7 @@ struct ManagedProjectState {
     last_failure_at_ms: u64,
     cooldown_until_ms: u64,
     paused: bool,
+    manual_hold_reason: String,
 }
 
 #[tokio::main]
@@ -100,6 +101,10 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some("pause") => update_manual_control(args.get(2).map(|s| s.as_str()).unwrap_or("lightpanda-automation"), ManualControlCommand::Pause),
+        Some("resume") => update_manual_control(args.get(2).map(|s| s.as_str()).unwrap_or("lightpanda-automation"), ManualControlCommand::Resume),
+        Some("hold") => update_manual_control_with_reason(args.get(2).map(|s| s.as_str()).unwrap_or("lightpanda-automation"), ManualControlCommand::Hold, &args[3..]),
+        Some("unhold") => update_manual_control(args.get(2).map(|s| s.as_str()).unwrap_or("lightpanda-automation"), ManualControlCommand::Unhold),
         Some("daemon") => run_daemon(&args[2..]).await,
         Some("install-cron") => install_cron(&args[2..]),
         _ => {
@@ -150,6 +155,7 @@ fn init_skeleton() -> Result<()> {
         last_failure_at_ms: 0,
         cooldown_until_ms: 0,
         paused: false,
+        manual_hold_reason: String::new(),
     };
 
     write_json("configs/lightpanda-automation.json", &config)?;
@@ -165,6 +171,70 @@ fn show_example(project_id: &str) -> Result<()> {
     let state = fs::read_to_string(format!("state/{}.json", project_id))
         .with_context(|| format!("missing state/{}.json", project_id))?;
     println!("== config ==\n{}\n\n== state ==\n{}", config, state);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ManualControlCommand {
+    Pause,
+    Resume,
+    Hold,
+    Unhold,
+}
+
+fn load_state(project_id: &str) -> Result<ManagedProjectState> {
+    let path = format!("state/{}.json", project_id);
+    let content = fs::read_to_string(&path).with_context(|| format!("missing {}", path))?;
+    Ok(serde_json::from_str(&content)?)
+}
+
+fn save_state(project_id: &str, state: &ManagedProjectState) -> Result<()> {
+    write_json(&format!("state/{}.json", project_id), state)
+}
+
+fn update_manual_control(project_id: &str, cmd: ManualControlCommand) -> Result<()> {
+    update_manual_control_internal(project_id, cmd, None)
+}
+
+fn update_manual_control_with_reason(project_id: &str, cmd: ManualControlCommand, rest: &[String]) -> Result<()> {
+    let reason = if rest.is_empty() { None } else { Some(rest.join(" ")) };
+    update_manual_control_internal(project_id, cmd, reason)
+}
+
+fn update_manual_control_internal(project_id: &str, cmd: ManualControlCommand, reason: Option<String>) -> Result<()> {
+    let mut state = load_state(project_id)?;
+    match cmd {
+        ManualControlCommand::Pause => {
+            state.paused = true;
+            state.last_summary = "已手动暂停 autopilot".to_string();
+            state.current_focus = "等待人工恢复".to_string();
+            state.current_objective = "暂停自动推进，直到收到 resume".to_string();
+        }
+        ManualControlCommand::Resume => {
+            state.paused = false;
+            state.cooldown_until_ms = 0;
+            state.last_summary = "已恢复 autopilot 自动推进".to_string();
+            state.current_focus = "恢复自动执行".to_string();
+            state.current_objective = "从当前阶段继续推进".to_string();
+        }
+        ManualControlCommand::Hold => {
+            state.paused = true;
+            state.manual_hold_reason = reason.unwrap_or_else(|| "manual hold".to_string());
+            state.last_summary = format!("已进入 manual hold：{}", state.manual_hold_reason);
+            state.current_focus = "等待人工解除 hold".to_string();
+            state.current_objective = "保留现场，禁止自动推进".to_string();
+        }
+        ManualControlCommand::Unhold => {
+            state.paused = false;
+            state.manual_hold_reason.clear();
+            state.cooldown_until_ms = 0;
+            state.last_summary = "已解除 manual hold".to_string();
+            state.current_focus = "恢复自动执行".to_string();
+            state.current_objective = "从当前阶段继续推进".to_string();
+        }
+    }
+    save_state(project_id, &state)?;
+    println!("manual control updated: project={}, paused={}, hold_reason={}", project_id, state.paused, if state.manual_hold_reason.is_empty() { "<none>" } else { &state.manual_hold_reason });
     Ok(())
 }
 
@@ -231,6 +301,8 @@ fn write_docs() -> Result<()> {
 - `cargo run -- show <project-id>`
 - `cargo run -- list-projects`
 - `cargo run -- tick <project-id>`
+- `cargo run -- pause <project-id>` / `resume <project-id>`
+- `cargo run -- hold <project-id> [reason...]` / `unhold <project-id>`
 - `cargo run -- daemon <project-id> [--interval-seconds N] [--ticks M]`
 
 ## 当前能力
@@ -238,6 +310,7 @@ fn write_docs() -> Result<()> {
 - 多项目配置发现
 - 独立 workflow 内核
 - 周期 tick / daemon
+- pause / resume / manual hold 控制面
 - 每 10 次 + 关键事件报告
 - 文档同步动作
 - 数据采集动作
@@ -253,6 +326,10 @@ fn print_help() {
     println!("  project-autopilot show <project-id>");
     println!("  project-autopilot list-projects");
     println!("  project-autopilot tick <project-id>");
+    println!("  project-autopilot pause <project-id>");
+    println!("  project-autopilot resume <project-id>");
+    println!("  project-autopilot hold <project-id> [reason...]");
+    println!("  project-autopilot unhold <project-id>");
     println!("  project-autopilot daemon <project-id> [--interval-seconds N] [--ticks M]");
     println!("  project-autopilot install-cron <project-id> [--interval-seconds N]");
 }

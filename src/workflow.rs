@@ -328,9 +328,14 @@ pub fn tick_project(project_id: &str) -> Result<(ManagedProjectState, Option<Wor
     let now_ms_value = now_ms();
 
     if state.paused {
-        state.last_summary = "autopilot 当前已暂停，跳过本轮 tick".to_string();
+        let hold_reason = if state.manual_hold_reason.is_empty() {
+            String::new()
+        } else {
+            format!("（manual hold：{}）", state.manual_hold_reason)
+        };
+        state.last_summary = format!("autopilot 当前已暂停{}，跳过本轮 tick", hold_reason);
         state.current_focus = "等待恢复运行".to_string();
-        state.current_objective = "人工取消 paused 后再继续自动推进".to_string();
+        state.current_objective = "人工取消 paused/hold 后再继续自动推进".to_string();
     } else if should_wait_for_cooldown(&state, now_ms_value) {
         let remain_ms = state.cooldown_until_ms.saturating_sub(now_ms_value);
         state.last_summary = format!("仍在冷却中，{} 秒后再自动重试", remain_ms / 1000);
@@ -593,6 +598,7 @@ mod tests {
             last_failure_at_ms: 0,
             cooldown_until_ms: 0,
             paused: false,
+            manual_hold_reason: String::new(),
         }
     }
 
