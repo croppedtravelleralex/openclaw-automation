@@ -87,6 +87,7 @@ pub enum ActionFailurePolicy {
     BlockProject,
     RequireHuman,
     Skip,
+    Fallback,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -569,6 +570,7 @@ fn run_action_plan(root: &Path, config: &ManagedProjectConfig, state: &ManagedPr
             if let Some(err) = last_err {
                 match node.on_fail {
                     ActionFailurePolicy::Skip => notes.push(format!("skip_after_failure:{}", err)),
+                    ActionFailurePolicy::Fallback => notes.push(format!("fallback_after_failure:{}", err)),
                     ActionFailurePolicy::RequireHuman | ActionFailurePolicy::BlockProject => return Err(err),
                 }
             }
@@ -1161,6 +1163,66 @@ edition = "2021"
         };
         let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
         assert!(record.note.contains("verified-output"));
+    }
+
+    #[test]
+    fn action_plan_can_skip_on_failure_without_blocking() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path());
+        let state = sample_state();
+        let suggestion = WorkflowSuggestion {
+            title: "执行建议第 1 项".to_string(),
+            priority: 1,
+            rationale: "feature".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let plan = ActionPlan {
+            id: "skip-plan".to_string(),
+            title: suggestion.title.clone(),
+            trigger: "feature".to_string(),
+            nodes: vec![ActionNode {
+                id: "n1".to_string(),
+                title: "shell".to_string(),
+                executor: ActionExecutor::Shell,
+                command: "printf bad-output".to_string(),
+                verify: Some(ActionVerifySpec { mode: VerifyMode::StdoutContains, expected: vec!["expected".to_string()] }),
+                retry: RetryPolicy { max_attempts: 1 },
+                rollback: None,
+                on_fail: ActionFailurePolicy::Skip,
+            }],
+        };
+        let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
+        assert!(record.note.contains("skip_after_failure"));
+    }
+
+    #[test]
+    fn action_plan_can_fallback_on_failure_without_blocking() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path());
+        let state = sample_state();
+        let suggestion = WorkflowSuggestion {
+            title: "执行建议第 1 项".to_string(),
+            priority: 1,
+            rationale: "feature".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let plan = ActionPlan {
+            id: "fallback-plan".to_string(),
+            title: suggestion.title.clone(),
+            trigger: "feature".to_string(),
+            nodes: vec![ActionNode {
+                id: "n1".to_string(),
+                title: "shell".to_string(),
+                executor: ActionExecutor::Shell,
+                command: "printf still-bad".to_string(),
+                verify: Some(ActionVerifySpec { mode: VerifyMode::StdoutContains, expected: vec!["expected".to_string()] }),
+                retry: RetryPolicy { max_attempts: 1 },
+                rollback: None,
+                on_fail: ActionFailurePolicy::Fallback,
+            }],
+        };
+        let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
+        assert!(record.note.contains("fallback_after_failure"));
     }
 
     #[test]
