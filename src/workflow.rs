@@ -53,6 +53,18 @@ impl WorkflowDocumentContext {
     }
 }
 
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowReport {
+    pub project_id: String,
+    pub trigger: String,
+    pub iteration: u64,
+    pub stage: String,
+    pub summary: String,
+    pub focus: String,
+    pub confirmations: Vec<String>,
+}
+
 pub fn default_suggestions_for_stage(stage: AutopilotStage) -> Vec<WorkflowSuggestion> {
     match stage {
         AutopilotStage::Plan => vec![
@@ -231,15 +243,16 @@ pub fn run_minimal_cycle_step(root: &Path, config: &ManagedProjectConfig, state:
     Ok(())
 }
 
-pub fn tick_project(project_id: &str) -> Result<ManagedProjectState> {
+pub fn tick_project(project_id: &str) -> Result<(ManagedProjectState, Option<WorkflowReport>)> {
     let config_path = PathBuf::from("configs").join(format!("{}.json", project_id));
     let state_path = PathBuf::from("state").join(format!("{}.json", project_id));
     let config: ManagedProjectConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     let mut state: ManagedProjectState = serde_json::from_str(&fs::read_to_string(&state_path)?)?;
     let root = PathBuf::from(&config.root);
     run_minimal_cycle_step(&root, &config, &mut state)?;
+    let report = maybe_write_report(project_id, &mut state)?;
     fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
-    Ok(state)
+    Ok((state, report))
 }
 
 fn append_execution_log(root: &Path, entries: &[WorkflowActionRecord]) -> Result<()> {
@@ -273,4 +286,35 @@ fn kind_name(kind: WorkflowSuggestionKind) -> &'static str {
         WorkflowSuggestionKind::Performance => "performance",
         WorkflowSuggestionKind::Test => "test",
     }
+}
+
+pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> Result<Option<WorkflowReport>> {
+    let trigger = if !state.pending_confirmation.is_empty() {
+        Some("key_event")
+    } else if state.loop_iteration > 0 && state.loop_iteration % 10 == 0 {
+        Some("every_ten_rounds")
+    } else {
+        None
+    };
+
+    let Some(trigger) = trigger else {
+        return Ok(None);
+    };
+
+    let report = WorkflowReport {
+        project_id: project_id.to_string(),
+        trigger: trigger.to_string(),
+        iteration: state.loop_iteration,
+        stage: format!("{:?}", state.stage),
+        summary: state.last_summary.clone(),
+        focus: state.current_focus.clone(),
+        confirmations: state.pending_confirmation.clone(),
+    };
+
+    let path = PathBuf::from("reports").join(format!("{}-latest.json", project_id));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+    Ok(Some(report))
 }

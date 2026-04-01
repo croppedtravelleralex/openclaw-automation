@@ -82,8 +82,11 @@ async fn main() -> Result<()> {
         Some("show") => show_example(),
         Some("tick") => {
             let project_id = args.get(2).map(|s| s.as_str()).unwrap_or("lightpanda-automation");
-            let state = tick_project(project_id)?;
+            let (state, report) = tick_project(project_id)?;
             println!("autopilot tick ok: project={}, stage={:?}, iteration={}", state.project_id, state.stage, state.loop_iteration);
+            if let Some(report) = report {
+                println!("autopilot report emitted: trigger={}, iteration={}", report.trigger, report.iteration);
+            }
             Ok(())
         }
         Some("daemon") => run_daemon(&args[2..]).await,
@@ -264,12 +267,15 @@ async fn run_daemon(args: &[String]) -> Result<()> {
     println!("autopilot daemon start: project={}, interval={}s, ticks={}", project_id, interval_seconds, max_ticks);
     let mut executed = 0usize;
     loop {
-        let state = tick_project(project_id)?;
+        let (state, report) = tick_project(project_id)?;
         executed += 1;
         println!(
             "autopilot daemon tick {} ok: project={}, stage={:?}, iteration={}",
             executed, state.project_id, state.stage, state.loop_iteration
         );
+        if let Some(report) = report {
+            println!("autopilot report emitted: trigger={}, iteration={}", report.trigger, report.iteration);
+        }
         if !state.pending_confirmation.is_empty() {
             println!("pending confirmations: {:?}", state.pending_confirmation);
         }
