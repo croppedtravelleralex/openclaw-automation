@@ -67,6 +67,9 @@ pub struct ActionNode {
     pub title: String,
     pub executor: ActionExecutor,
     pub command: String,
+    pub verify: Option<ActionVerifySpec>,
+    pub retry: RetryPolicy,
+    pub rollback: Option<ActionRollbackSpec>,
     pub on_fail: ActionFailurePolicy,
 }
 
@@ -86,6 +89,31 @@ pub enum ActionFailurePolicy {
     Skip,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionVerifySpec {
+    pub mode: VerifyMode,
+    pub expected: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyMode {
+    ExitCodeZero,
+    StdoutContains,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionRollbackSpec {
+    pub executor: ActionExecutor,
+    pub command: String,
+}
+
+
 pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> Option<ActionPlan> {
     if let Some(command) = configured_command_for_suggestion(config, suggestion) {
         return Some(ActionPlan {
@@ -97,6 +125,9 @@ pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &W
                 title: suggestion.title.clone(),
                 executor: ActionExecutor::Shell,
                 command: command.to_string(),
+                verify: Some(ActionVerifySpec { mode: VerifyMode::ExitCodeZero, expected: Vec::new() }),
+                retry: RetryPolicy { max_attempts: 2 },
+                rollback: None,
                 on_fail: ActionFailurePolicy::BlockProject,
             }],
         });
@@ -112,6 +143,9 @@ pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &W
                 title: suggestion.title.clone(),
                 executor: ActionExecutor::InternalDocSync,
                 command: String::new(),
+                verify: None,
+                retry: RetryPolicy { max_attempts: 1 },
+                rollback: None,
                 on_fail: ActionFailurePolicy::RequireHuman,
             }],
         }),
@@ -124,6 +158,9 @@ pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &W
                 title: suggestion.title.clone(),
                 executor: ActionExecutor::InternalCollect,
                 command: String::new(),
+                verify: None,
+                retry: RetryPolicy { max_attempts: 1 },
+                rollback: None,
                 on_fail: ActionFailurePolicy::RequireHuman,
             }],
         }),
@@ -471,20 +508,69 @@ pub fn tick_project(project_id: &str) -> Result<(ManagedProjectState, Option<Wor
 fn run_action_plan(root: &Path, config: &ManagedProjectConfig, state: &ManagedProjectState, suggestion: &WorkflowSuggestion, plan: &ActionPlan) -> Result<WorkflowActionRecord> {
     let mut notes = Vec::new();
     for node in &plan.nodes {
-        match node.executor {
-            ActionExecutor::Shell => {
-                let stdout = run_shell_command(root, &node.command)?;
-                if stdout.is_empty() {
-                    notes.push(format!("shell:{}", node.command));
-                } else {
-                    notes.push(format!("shell:{} => {}", node.command, stdout.lines().take(2).collect::<Vec<_>>().join(" | ")));
+        let mut last_err: Option<anyhow::Error> = None;
+        let attempts = node.retry.max_attempts.max(1);
+        let mut completed = false;
+        for _ in 0..attempts {
+            let attempt: Result<String> = match node.executor {
+                ActionExecutor::Shell => {
+                    match run_shell_command(root, &node.command) {
+                        Ok(stdout) => {
+                            if let Some(verify) = &node.verify {
+                                match verify.mode {
+                                    VerifyMode::ExitCodeZero => {
+                                        if stdout.is_empty() {
+                                            Ok(format!("shell:{}", node.command))
+                                        } else {
+                                            Ok(format!("shell:{} => {}", node.command, stdout.lines().take(2).collect::<Vec<_>>().join(" | ")))
+                                        }
+                                    }
+                                    VerifyMode::StdoutContains => {
+                                        let ok = verify.expected.iter().all(|item| stdout.contains(item));
+                                        if !ok {
+                                            Err(anyhow::anyhow!("verify failed for node {}", node.id))
+                                        } else if stdout.is_empty() {
+                                            Ok(format!("shell:{}", node.command))
+                                        } else {
+                                            Ok(format!("shell:{} => {}", node.command, stdout.lines().take(2).collect::<Vec<_>>().join(" | ")))
+                                        }
+                                    }
+                                }
+                            } else if stdout.is_empty() {
+                                Ok(format!("shell:{}", node.command))
+                            } else {
+                                Ok(format!("shell:{} => {}", node.command, stdout.lines().take(2).collect::<Vec<_>>().join(" | ")))
+                            }
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
+                ActionExecutor::InternalDocSync => sync_project_docs(root, config),
+                ActionExecutor::InternalCollect => collect_project_snapshot(root, config, state),
+            };
+            match attempt {
+                Ok(note) => {
+                    notes.push(note);
+                    completed = true;
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
                 }
             }
-            ActionExecutor::InternalDocSync => {
-                notes.push(sync_project_docs(root, config)?);
+        }
+        if !completed {
+            if let Some(rollback) = &node.rollback {
+                if let ActionExecutor::Shell = rollback.executor {
+                    let _ = run_shell_command(root, &rollback.command);
+                    notes.push(format!("rollback:{}", rollback.command));
+                }
             }
-            ActionExecutor::InternalCollect => {
-                notes.push(collect_project_snapshot(root, config, state)?);
+            if let Some(err) = last_err {
+                match node.on_fail {
+                    ActionFailurePolicy::Skip => notes.push(format!("skip_after_failure:{}", err)),
+                    ActionFailurePolicy::RequireHuman | ActionFailurePolicy::BlockProject => return Err(err),
+                }
             }
         }
     }
@@ -985,6 +1071,67 @@ edition = "2021"
         let plan = action_plan_from_suggestion(&config, &suggestion).unwrap();
         assert_eq!(plan.nodes.len(), 1);
         assert_eq!(plan.nodes[0].executor, ActionExecutor::Shell);
+    }
+
+    #[test]
+    fn action_plan_shell_node_supports_stdout_verify() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path());
+        let state = sample_state();
+        let suggestion = WorkflowSuggestion {
+            title: "执行建议第 1 项".to_string(),
+            priority: 1,
+            rationale: "feature".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let plan = ActionPlan {
+            id: "p1".to_string(),
+            title: suggestion.title.clone(),
+            trigger: "feature".to_string(),
+            nodes: vec![ActionNode {
+                id: "n1".to_string(),
+                title: "shell".to_string(),
+                executor: ActionExecutor::Shell,
+                command: "printf verified-output".to_string(),
+                verify: Some(ActionVerifySpec { mode: VerifyMode::StdoutContains, expected: vec!["verified-output".to_string()] }),
+                retry: RetryPolicy { max_attempts: 2 },
+                rollback: None,
+                on_fail: ActionFailurePolicy::BlockProject,
+            }],
+        };
+        let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
+        assert!(record.note.contains("verified-output"));
+    }
+
+    #[test]
+    fn action_plan_runs_rollback_when_shell_verify_fails() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path());
+        let state = sample_state();
+        let suggestion = WorkflowSuggestion {
+            title: "执行建议第 1 项".to_string(),
+            priority: 1,
+            rationale: "feature".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let plan = ActionPlan {
+            id: "p2".to_string(),
+            title: suggestion.title.clone(),
+            trigger: "feature".to_string(),
+            nodes: vec![ActionNode {
+                id: "n1".to_string(),
+                title: "shell".to_string(),
+                executor: ActionExecutor::Shell,
+                command: "printf no-match".to_string(),
+                verify: Some(ActionVerifySpec { mode: VerifyMode::StdoutContains, expected: vec!["expected".to_string()] }),
+                retry: RetryPolicy { max_attempts: 1 },
+                rollback: Some(ActionRollbackSpec { executor: ActionExecutor::Shell, command: "touch rollback.txt".to_string() }),
+                on_fail: ActionFailurePolicy::RequireHuman,
+            }],
+        };
+        let err = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap_err();
+        assert!(format!("{}", err).contains("verify failed"));
+        assert!(dir.path().join("rollback.txt").exists());
     }
 
     #[test]
