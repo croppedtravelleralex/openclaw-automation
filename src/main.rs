@@ -41,6 +41,7 @@ struct ManagedProjectConfig {
     todo_path: String,
     status_path: String,
     progress_path: String,
+    #[serde(default)]
     action_commands: BTreeMap<String, String>,
 }
 
@@ -139,7 +140,10 @@ fn init_skeleton() -> Result<()> {
         todo_path: "TODO.md".to_string(),
         status_path: "STATUS.md".to_string(),
         progress_path: "PROGRESS.md".to_string(),
-        action_commands: BTreeMap::new(),
+        action_commands: BTreeMap::from([
+            ("feature".to_string(), r#"printf 'feature tick\n' >> EXECUTION_LOG.md"#.to_string()),
+            ("bug_fix".to_string(), r#"printf 'bug fix tick\n' >> EXECUTION_LOG.md"#.to_string()),
+        ]),
     };
     let state = ManagedProjectState {
         project_id: "lightpanda-automation".to_string(),
@@ -318,6 +322,10 @@ fn write_docs() -> Result<()> {
 - 架构决策
 - 外部 push
 - 破坏性修改
+
+## 可插拔执行
+
+可在项目配置的 `action_commands` 中为 `feature` / `bug_fix` / `refactor` / `performance` 等 kind 配置 shell 命令；autopilot 命中后会在项目根目录执行对应命令，未配置时退回结构化计划记录。
 - 重依赖安装
 - 连续失败过多
 "#,
@@ -338,6 +346,20 @@ fn write_docs() -> Result<()> {
 - `cargo run -- pause <project-id>` / `resume <project-id>`
 - `cargo run -- hold <project-id> [reason...]` / `unhold <project-id>`
 - `cargo run -- daemon <project-id> [--interval-seconds N] [--ticks M]`
+
+## action_commands 示例
+
+```json
+{
+  "action_commands": {
+    "feature": "cargo test -q",
+    "bug_fix": "cargo test -q",
+    "performance": "printf 'perf tick\n' >> EXECUTION_LOG.md"
+  }
+}
+```
+
+可用 key 与内部 kind 对应：`feature` / `bug_scan` / `bug_fix` / `refactor` / `performance`。
 
 ## 当前能力
 

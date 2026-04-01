@@ -907,6 +907,45 @@ edition = "2021"
     }
 
     #[test]
+    fn config_without_action_commands_still_deserializes() {
+        let raw = r#"{
+          "id": "demo",
+          "root": "/tmp/demo",
+          "enabled": true,
+          "default_execute": true,
+          "collect_data": true,
+          "report_every_rounds": 10,
+          "report_policy": "hybrid",
+          "confirmation_points": ["external_push"],
+          "vision_path": "VISION.md",
+          "direction_path": "CURRENT_DIRECTION.md",
+          "todo_path": "TODO.md",
+          "status_path": "STATUS.md",
+          "progress_path": "PROGRESS.md"
+        }"#;
+        let config: ManagedProjectConfig = serde_json::from_str(raw).unwrap();
+        assert!(config.action_commands.is_empty());
+    }
+
+    #[test]
+    fn configured_commands_can_drive_a_small_cycle() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("VISION.md"), "artifact").unwrap();
+        fs::write(dir.path().join("CURRENT_DIRECTION.md"), "trust score verify 文档").unwrap();
+        fs::write(dir.path().join("TODO.md"), "同步 CURRENT_* 口径").unwrap();
+        fs::write(dir.path().join("STATUS.md"), "# STATUS
+").unwrap();
+        let mut config = sample_config(dir.path());
+        config.action_commands.insert("feature".to_string(), "printf executed-cycle >> cycle.log".to_string());
+        let mut state = sample_state();
+        run_minimal_cycle_step(dir.path(), &config, &mut state).unwrap();
+        run_minimal_cycle_step(dir.path(), &config, &mut state).unwrap();
+        assert_eq!(state.stage, crate::AutopilotStage::Verify);
+        let log = fs::read_to_string(dir.path().join("cycle.log")).unwrap();
+        assert!(log.contains("executed-cycle"));
+    }
+
+    #[test]
     fn external_push_confirmation_is_enforced_by_strategy() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("VISION.md"), "artifact").unwrap();

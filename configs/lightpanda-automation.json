@@ -17,5 +17,9 @@
   "direction_path": "CURRENT_DIRECTION.md",
   "todo_path": "TODO.md",
   "status_path": "STATUS.md",
-  "progress_path": "PROGRESS.md"
+  "progress_path": "PROGRESS.md",
+  "action_commands": {
+    "feature": "printf 'feature tick\\n' >> EXECUTION_LOG.md",
+    "bug_fix": "printf 'bug fix tick\\n' >> EXECUTION_LOG.md"
+  }
 }
