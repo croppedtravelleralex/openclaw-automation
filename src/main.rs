@@ -43,6 +43,8 @@ struct ManagedProjectConfig {
     progress_path: String,
     #[serde(default)]
     action_commands: BTreeMap<String, String>,
+    #[serde(default)]
+    action_command_overrides: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,6 +146,9 @@ fn init_skeleton() -> Result<()> {
             ("feature".to_string(), r#"printf 'feature tick\n' >> EXECUTION_LOG.md"#.to_string()),
             ("bug_fix".to_string(), r#"printf 'bug fix tick\n' >> EXECUTION_LOG.md"#.to_string()),
         ]),
+        action_command_overrides: BTreeMap::from([
+            ("继续推进 trust score 核心化".to_string(), r#"printf 'trust score step\n' >> EXECUTION_LOG.md"#.to_string()),
+        ]),
     };
     let state = ManagedProjectState {
         project_id: "lightpanda-automation".to_string(),
@@ -186,6 +191,8 @@ fn show_example(project_id: &str) -> Result<()> {
 }
 
 fn show_status(project_id: &str) -> Result<()> {
+    let config_path = format!("configs/{}.json", project_id);
+    let config: ManagedProjectConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     let state = load_state(project_id)?;
     println!("project: {}", state.project_id);
     println!("stage: {:?}", state.stage);
@@ -201,6 +208,14 @@ fn show_status(project_id: &str) -> Result<()> {
     println!("pending_confirmations: {}", state.pending_confirmation.len());
     for item in state.pending_confirmation.iter().take(5) {
         println!("- {}", item);
+    }
+    println!("configured_action_kinds: {}", config.action_commands.len());
+    for (kind, cmd) in config.action_commands.iter().take(5) {
+        println!("kind:{} => {}", kind, cmd);
+    }
+    println!("configured_action_overrides: {}", config.action_command_overrides.len());
+    for (title, cmd) in config.action_command_overrides.iter().take(5) {
+        println!("override:{} => {}", title, cmd);
     }
     println!("last_error_category: {}", if state.last_error_category.is_empty() { "<none>" } else { &state.last_error_category });
     println!("recovery_hint: {}", if state.recovery_hint.is_empty() { "<none>" } else { &state.recovery_hint });
@@ -355,11 +370,15 @@ fn write_docs() -> Result<()> {
     "feature": "cargo test -q",
     "bug_fix": "cargo test -q",
     "performance": "printf 'perf tick\n' >> EXECUTION_LOG.md"
+  },
+  "action_command_overrides": {
+    "继续推进 trust score 核心化": "printf 'trust score step\n' >> EXECUTION_LOG.md"
   }
 }
 ```
 
-可用 key 与内部 kind 对应：`feature` / `bug_scan` / `bug_fix` / `refactor` / `performance`。
+优先级：**先匹配 `action_command_overrides[建议标题]`，再回退到 `action_commands[kind]`**。
+可用 kind key：`feature` / `bug_scan` / `bug_fix` / `refactor` / `performance`。
 
 ## 当前能力
 
@@ -368,6 +387,7 @@ fn write_docs() -> Result<()> {
 - 周期 tick / daemon
 - pause / resume / manual hold 控制面
 - status 运行态查询（含 cooldown / pending confirmations）
+- action_commands + 标题级 overrides
 - 每 10 次 + 关键事件报告
 - 文档同步动作
 - 数据采集动作

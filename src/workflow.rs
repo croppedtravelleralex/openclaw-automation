@@ -409,8 +409,12 @@ fn run_structured_action(root: &Path, config: &ManagedProjectConfig, state: &Man
     }
 }
 
-fn configured_command_for_kind<'a>(config: &'a ManagedProjectConfig, kind: WorkflowSuggestionKind) -> Option<&'a str> {
-    config.action_commands.get(kind_name(kind)).map(|s| s.as_str())
+fn configured_command_for_suggestion<'a>(config: &'a ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> Option<&'a str> {
+    config
+        .action_command_overrides
+        .get(&suggestion.title)
+        .map(|s| s.as_str())
+        .or_else(|| config.action_commands.get(kind_name(suggestion.kind)).map(|s| s.as_str()))
 }
 
 fn run_shell_command(root: &Path, command: &str) -> Result<()> {
@@ -418,7 +422,7 @@ fn run_shell_command(root: &Path, command: &str) -> Result<()> {
 }
 
 fn run_configured_or_plan_action(root: &Path, config: &ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
-    if let Some(command) = configured_command_for_kind(config, suggestion.kind) {
+    if let Some(command) = configured_command_for_suggestion(config, suggestion) {
         run_shell_command(root, command)?;
         let note = format!("已执行配置命令：{}", command);
         append_execution_log(root, &[WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "executed".to_string(), note: note.clone() }])?;
@@ -568,19 +572,26 @@ fn run_status(root: &Path, program: &str, args: &[&str]) -> Result<()> {
 fn append_execution_log(root: &Path, entries: &[WorkflowActionRecord]) -> Result<()> {
     if entries.is_empty() { return Ok(()); }
     let path = root.join("EXECUTION_LOG.md");
-    let mut existing = if path.exists() { fs::read_to_string(&path)? } else { String::new() };
-    if !existing.ends_with('\n') { existing.push('\n'); }
-    existing.push_str("\n## Autopilot Workflow Action Dispatch\n\n");
+    let existing = if path.exists() { fs::read_to_string(&path)? } else { String::new() };
+    let kept = existing
+        .lines()
+        .filter(|line| !line.contains("已执行最小真实动作：将建议写入 EXECUTION_LOG.md"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut next = kept;
+    if !next.is_empty() && !next.ends_with('\n') { next.push('\n'); }
+    next.push_str("\n## Autopilot Workflow Action Dispatch\n\n");
     for entry in entries {
-        existing.push_str(&format!("- {} [{}]: {}\n", entry.title, kind_name(entry.kind), entry.note));
+        next.push_str(&format!("- {} [{} / {}]: {}\n", entry.title, kind_name(entry.kind), entry.status, entry.note));
     }
-    fs::write(path, existing)?;
+    fs::write(path, next)?;
     Ok(())
 }
 
 fn suggestion(title: &str, priority: u8, rationale: &str, kind: WorkflowSuggestionKind) -> WorkflowSuggestion {
     WorkflowSuggestion { title: title.to_string(), priority, rationale: rationale.to_string(), kind }
 }
+
 
 fn kind_name(kind: WorkflowSuggestionKind) -> &'static str {
     match kind {
@@ -671,6 +682,7 @@ mod tests {
             status_path: "STATUS.md".to_string(),
             progress_path: "PROGRESS.md".to_string(),
             action_commands: std::collections::BTreeMap::new(),
+            action_command_overrides: std::collections::BTreeMap::new(),
         }
     }
 
@@ -824,6 +836,23 @@ edition = "2021"
     }
 
     #[test]
+    fn title_override_beats_kind_command() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(dir.path());
+        config.action_commands.insert("feature".to_string(), "printf kind > winner.txt".to_string());
+        config.action_command_overrides.insert("执行建议第 1 项".to_string(), "printf title > winner.txt".to_string());
+        let suggestion = WorkflowSuggestion {
+            title: "执行建议第 1 项".to_string(),
+            priority: 1,
+            rationale: "feature".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let record = run_configured_or_plan_action(dir.path(), &config, &suggestion).unwrap();
+        assert_eq!(record.status, "executed");
+        assert_eq!(fs::read_to_string(dir.path().join("winner.txt")).unwrap(), "title");
+    }
+
+    #[test]
     fn configured_feature_action_executes_shell_command() {
         let dir = tempdir().expect("tempdir");
         let mut config = sample_config(dir.path());
@@ -925,6 +954,25 @@ edition = "2021"
         }"#;
         let config: ManagedProjectConfig = serde_json::from_str(raw).unwrap();
         assert!(config.action_commands.is_empty());
+    }
+
+    #[test]
+    fn append_execution_log_cleans_legacy_logged_lines() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("EXECUTION_LOG.md"),
+            "- 旧动作 [feature]: 已执行最小真实动作：将建议写入 EXECUTION_LOG.md；原因：x
+",
+        ).unwrap();
+        append_execution_log(dir.path(), &[WorkflowActionRecord {
+            title: "新动作".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+            status: "executed".to_string(),
+            note: "已执行配置命令：printf ok".to_string(),
+        }]).unwrap();
+        let log = fs::read_to_string(dir.path().join("EXECUTION_LOG.md")).unwrap();
+        assert!(!log.contains("已执行最小真实动作：将建议写入 EXECUTION_LOG.md"));
+        assert!(log.contains("[feature / executed]"));
     }
 
     #[test]
