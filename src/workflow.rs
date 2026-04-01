@@ -838,6 +838,7 @@ fn append_execution_log(root: &Path, entries: &[WorkflowActionRecord]) -> Result
     if entries.is_empty() { return Ok(()); }
     let path = root.join("EXECUTION_LOG.md");
     let existing = if path.exists() { fs::read_to_string(&path)? } else { String::new() };
+    let legacy_marker = "## Workflow Action Dispatch";
     let marker = "## Autopilot Workflow Action Dispatch";
     let kept_lines = existing
         .lines()
@@ -845,11 +846,13 @@ fn append_execution_log(root: &Path, entries: &[WorkflowActionRecord]) -> Result
         .collect::<Vec<_>>();
     let kept = kept_lines.join("
 ");
-    let base = if let Some(idx) = kept.find(marker) {
-        kept[..idx].trim_end().to_string()
-    } else {
-        kept.trim_end().to_string()
-    };
+    let mut base = kept.trim_end().to_string();
+    if let Some(idx) = base.find(legacy_marker) {
+        base = base[..idx].trim_end().to_string();
+    }
+    if let Some(idx) = base.find(marker) {
+        base = base[..idx].trim_end().to_string();
+    }
     let mut next = base;
     if !next.is_empty() {
         next.push_str("
@@ -1579,6 +1582,7 @@ edition = "2021"
         }]).unwrap();
         let log = fs::read_to_string(dir.path().join("EXECUTION_LOG.md")).unwrap();
         assert!(!log.contains("已执行最小真实动作：将建议写入 EXECUTION_LOG.md"));
+        assert!(!log.contains("## Workflow Action Dispatch"));
         assert!(log.contains("[feature / executed]"));
     }
 
