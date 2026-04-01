@@ -417,14 +417,22 @@ fn configured_command_for_suggestion<'a>(config: &'a ManagedProjectConfig, sugge
         .or_else(|| config.action_commands.get(kind_name(suggestion.kind)).map(|s| s.as_str()))
 }
 
-fn run_shell_command(root: &Path, command: &str) -> Result<()> {
-    run_status(root, "bash", &["-lc", command])
+fn run_shell_command(root: &Path, command: &str) -> Result<String> {
+    let out = Command::new("bash").current_dir(root).args(["-lc", command]).output()?;
+    if !out.status.success() {
+        bail!("command failed: bash -lc {}", command);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn run_configured_or_plan_action(root: &Path, config: &ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
     if let Some(command) = configured_command_for_suggestion(config, suggestion) {
-        run_shell_command(root, command)?;
-        let note = format!("已执行配置命令：{}", command);
+        let stdout = run_shell_command(root, command)?;
+        let note = if stdout.is_empty() {
+            format!("已执行配置命令：{}", command)
+        } else {
+            format!("已执行配置命令：{}；stdout 摘要：{}", command, stdout.lines().take(2).collect::<Vec<_>>().join(" | "))
+        };
         append_execution_log(root, &[WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "executed".to_string(), note: note.clone() }])?;
         Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "executed".to_string(), note })
     } else {
@@ -850,6 +858,13 @@ edition = "2021"
         let record = run_configured_or_plan_action(dir.path(), &config, &suggestion).unwrap();
         assert_eq!(record.status, "executed");
         assert_eq!(fs::read_to_string(dir.path().join("winner.txt")).unwrap(), "title");
+    }
+
+    #[test]
+    fn shell_command_stdout_is_captured_not_leaked() {
+        let dir = tempdir().expect("tempdir");
+        let stdout = run_shell_command(dir.path(), "printf hello-from-stdout").unwrap();
+        assert_eq!(stdout, "hello-from-stdout");
     }
 
     #[test]
