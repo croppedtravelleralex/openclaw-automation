@@ -1,0 +1,1 @@
+*/10 * * * * cd /root/SelfMadeprojects/project-autopilot && cargo run -- daemon lightpanda-automation --interval-seconds 600 --ticks 1 >> reports/cron.log 2>&1

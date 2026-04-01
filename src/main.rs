@@ -6,7 +6,7 @@ use tokio::time::sleep;
 
 mod workflow;
 
-use workflow::{discover_projects, tick_project, WorkflowActionRecord, WorkflowSuggestion};
+use workflow::{discover_projects, render_report_message, tick_project, WorkflowActionRecord, WorkflowSuggestion};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,11 +91,12 @@ async fn main() -> Result<()> {
             let (state, report) = tick_project(project_id)?;
             println!("autopilot tick ok: project={}, stage={:?}, iteration={}", state.project_id, state.stage, state.loop_iteration);
             if let Some(report) = report {
-                println!("autopilot report emitted: trigger={}, iteration={}", report.trigger, report.iteration);
+                println!("autopilot report emitted: trigger={}, iteration={}\n{}", report.trigger, report.iteration, render_report_message(&report));
             }
             Ok(())
         }
         Some("daemon") => run_daemon(&args[2..]).await,
+        Some("install-cron") => install_cron(&args[2..]),
         _ => {
             print_help();
             Ok(())
@@ -243,6 +244,7 @@ fn print_help() {
     println!("  project-autopilot list-projects");
     println!("  project-autopilot tick <project-id>");
     println!("  project-autopilot daemon <project-id> [--interval-seconds N] [--ticks M]");
+    println!("  project-autopilot install-cron <project-id> [--interval-seconds N]");
 }
 
 async fn run_daemon(args: &[String]) -> Result<()> {
@@ -283,5 +285,28 @@ async fn run_daemon(args: &[String]) -> Result<()> {
         }
         sleep(Duration::from_secs(interval_seconds)).await;
     }
+    Ok(())
+}
+
+
+fn install_cron(args: &[String]) -> Result<()> {
+    let project_id = args.first().map(|s| s.as_str()).unwrap_or("lightpanda-automation");
+    let mut interval_seconds: u64 = 600;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--interval-seconds" => {
+                let value = args.get(i + 1).ok_or_else(|| anyhow!("missing value for --interval-seconds"))?;
+                interval_seconds = value.parse::<u64>()?;
+                i += 2;
+            }
+            other => bail!("unknown install-cron arg: {}", other),
+        }
+    }
+    let minutes = std::cmp::max(1, interval_seconds / 60);
+    let cron_line = format!("*/{} * * * * cd /root/SelfMadeprojects/project-autopilot && cargo run -- daemon {} --interval-seconds {} --ticks 1 >> reports/cron.log 2>&1
+", minutes, project_id, interval_seconds);
+    fs::write("reports/cron-example.txt", &cron_line)?;
+    println!("cron example written to reports/cron-example.txt\n{}", cron_line);
     Ok(())
 }

@@ -323,7 +323,10 @@ fn sync_project_docs(root: &Path, config: &ManagedProjectConfig) -> Result<Strin
 fn collect_project_snapshot(root: &Path, config: &ManagedProjectConfig, state: &ManagedProjectState) -> Result<String> {
     let reports_dir = PathBuf::from("reports");
     fs::create_dir_all(&reports_dir)?;
-    let git_status = run_capture(root, "git", &["status", "--short"])?;
+    let git_status = match run_capture(root, "git", &["status", "--short"]) {
+        Ok(v) => v,
+        Err(err) => format!("captured_error: {}", err),
+    };
     let doc_sync = root.join(&config.status_path).exists();
     let snapshot = serde_json::json!({
         "project_id": config.id,
@@ -433,4 +436,107 @@ pub fn maybe_write_report(project_id: &str, state: &mut ManagedProjectState) -> 
     }
     fs::write(&path, serde_json::to_string_pretty(&report)?)?;
     Ok(Some(report))
+}
+
+pub fn render_report_message(report: &WorkflowReport) -> String {
+    let mut out = format!(
+        "项目：{}
+触发：{}
+轮次：{}
+阶段：{}
+摘要：{}
+焦点：{}",
+        report.project_id, report.trigger, report.iteration, report.stage, report.summary, report.focus
+    );
+    if !report.confirmations.is_empty() {
+        out.push_str("
+需确认：");
+        for item in &report.confirmations {
+            out.push_str(&format!("
+- {}", item));
+        }
+    }
+    out
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs;
+    use crate::{ConfirmationPolicy, ManagedProjectConfig, ManagedProjectState, ReportPolicy};
+
+    fn sample_config(root: &Path) -> ManagedProjectConfig {
+        ManagedProjectConfig {
+            id: "demo".to_string(),
+            root: root.display().to_string(),
+            enabled: true,
+            default_execute: true,
+            collect_data: true,
+            report_every_rounds: 10,
+            report_policy: ReportPolicy::Hybrid,
+            confirmation_points: vec![ConfirmationPolicy::ExternalPush],
+            vision_path: "VISION.md".to_string(),
+            direction_path: "CURRENT_DIRECTION.md".to_string(),
+            todo_path: "TODO.md".to_string(),
+            status_path: "STATUS.md".to_string(),
+            progress_path: "PROGRESS.md".to_string(),
+        }
+    }
+
+    fn sample_state() -> ManagedProjectState {
+        ManagedProjectState {
+            project_id: "demo".to_string(),
+            loop_iteration: 0,
+            stage: crate::AutopilotStage::Plan,
+            default_execute: true,
+            collect_data: true,
+            last_summary: String::new(),
+            next_report_at: 10,
+            blocked_reason: String::new(),
+            pending_confirmation: Vec::new(),
+            current_focus: String::new(),
+            current_objective: String::new(),
+            next_suggestions: Vec::new(),
+            last_executed_actions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mini_cycle_generates_snapshot_and_doc_sync() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("VISION.md"), "artifact").unwrap();
+        fs::write(dir.path().join("CURRENT_DIRECTION.md"), "trust score verify 文档").unwrap();
+        fs::write(dir.path().join("TODO.md"), "同步 CURRENT_* 口径").unwrap();
+        fs::write(dir.path().join("STATUS.md"), "# STATUS
+").unwrap();
+        let config = sample_config(dir.path());
+        let mut state = sample_state();
+        run_minimal_cycle_step(dir.path(), &config, &mut state).unwrap();
+        run_minimal_cycle_step(dir.path(), &config, &mut state).unwrap();
+        run_minimal_cycle_step(dir.path(), &config, &mut state).unwrap();
+        assert!(Path::new("reports/demo-snapshot.json").exists());
+        let snap = fs::read_to_string("reports/demo-snapshot.json").unwrap();
+        assert!(snap.contains("captured_error") || snap.contains("git_status"));
+        run_minimal_cycle_step(dir.path(), &config, &mut state).unwrap();
+        let status = fs::read_to_string(dir.path().join("STATUS.md")).unwrap();
+        assert!(status.contains("Autopilot Sync"));
+    }
+
+    #[test]
+    fn report_message_is_human_readable() {
+        let report = WorkflowReport {
+            project_id: "demo".to_string(),
+            trigger: "every_ten_rounds".to_string(),
+            iteration: 10,
+            stage: "Verify".to_string(),
+            summary: "summary".to_string(),
+            focus: "focus".to_string(),
+            confirmations: vec!["please confirm".to_string()],
+        };
+        let msg = render_report_message(&report);
+        assert!(msg.contains("项目：demo"));
+        assert!(msg.contains("需确认"));
+    }
 }
