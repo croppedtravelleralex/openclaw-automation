@@ -124,6 +124,23 @@ pub struct ActionRollbackSpec {
 
 pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> Option<ActionPlan> {
     if let Some(command) = configured_command_for_suggestion(config, suggestion) {
+        let (on_fail, fallback) = match suggestion.title.as_str() {
+            "推进 verify / smoke / batch verify 质量闭环" => (
+                ActionFailurePolicy::Fallback,
+                Some(ActionFallbackSpec {
+                    executor: ActionExecutor::InternalCollect,
+                    command: String::new(),
+                }),
+            ),
+            "继续推进 trust score 核心化" => (
+                ActionFailurePolicy::Skip,
+                None,
+            ),
+            _ => (
+                ActionFailurePolicy::BlockProject,
+                None,
+            ),
+        };
         return Some(ActionPlan {
             id: format!("plan-{}", suggestion.title),
             title: suggestion.title.clone(),
@@ -136,8 +153,8 @@ pub fn action_plan_from_suggestion(config: &ManagedProjectConfig, suggestion: &W
                 verify: Some(ActionVerifySpec { mode: VerifyMode::ExitCodeZero, expected: Vec::new() }),
                 retry: RetryPolicy { max_attempts: 2 },
                 rollback: None,
-                fallback: None,
-                on_fail: ActionFailurePolicy::BlockProject,
+                fallback,
+                on_fail,
             }],
         });
     }
@@ -1150,6 +1167,43 @@ edition = "2021"
         let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
         assert_eq!(record.status, "executed_via_plan");
         assert_eq!(fs::read_to_string(dir.path().join("winner.txt")).unwrap(), "title");
+    }
+
+    #[test]
+    fn verify_loop_suggestion_uses_fallback_policy() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(dir.path());
+        config.action_command_overrides.insert(
+            "推进 verify / smoke / batch verify 质量闭环".to_string(),
+            "cargo test -q".to_string(),
+        );
+        let suggestion = WorkflowSuggestion {
+            title: "推进 verify / smoke / batch verify 质量闭环".to_string(),
+            priority: 1,
+            rationale: "verify".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let plan = action_plan_from_suggestion(&config, &suggestion).unwrap();
+        assert_eq!(plan.nodes[0].on_fail, ActionFailurePolicy::Fallback);
+        assert!(plan.nodes[0].fallback.is_some());
+    }
+
+    #[test]
+    fn trust_score_shadow_plan_uses_skip_policy() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(dir.path());
+        config.action_command_overrides.insert(
+            "继续推进 trust score 核心化".to_string(),
+            "printf shadow-plan".to_string(),
+        );
+        let suggestion = WorkflowSuggestion {
+            title: "继续推进 trust score 核心化".to_string(),
+            priority: 1,
+            rationale: "trust".to_string(),
+            kind: WorkflowSuggestionKind::Feature,
+        };
+        let plan = action_plan_from_suggestion(&config, &suggestion).unwrap();
+        assert_eq!(plan.nodes[0].on_fail, ActionFailurePolicy::Skip);
     }
 
     #[test]
