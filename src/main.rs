@@ -6,7 +6,7 @@ use tokio::time::sleep;
 
 mod workflow;
 
-use workflow::{discover_projects, render_report_message, tick_project, WorkflowActionRecord, WorkflowSuggestion};
+use workflow::{action_plan_from_suggestion, discover_projects, render_report_message, tick_project, ActionExecutor, WorkflowActionRecord, WorkflowSuggestion};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -230,6 +230,16 @@ fn show_status(project_id: &str) -> Result<()> {
             workflow::WorkflowSuggestionKind::Collect => "collect",
             workflow::WorkflowSuggestionKind::Commit => "commit",
         }, resolve_action_match(&config, suggestion));
+        if let Some(plan) = action_plan_from_suggestion(&config, suggestion) {
+            println!("  action_plan:{} nodes={}", plan.id, plan.nodes.len());
+            for node in plan.nodes.iter().take(3) {
+                let verify = if node.verify.is_some() { "verify" } else { "no-verify" };
+                let rollback = if node.rollback.is_some() { "rollback" } else { "no-rollback" };
+                println!("  - node:{} executor={} retry={} {} {}", node.id, action_executor_label(&node.executor), node.retry.max_attempts, verify, rollback);
+            }
+        } else {
+            println!("  action_plan:<none>");
+        }
     }
     println!("last_error_category: {}", if state.last_error_category.is_empty() { "<none>" } else { &state.last_error_category });
     println!("recovery_hint: {}", if state.recovery_hint.is_empty() { "<none>" } else { &state.recovery_hint });
@@ -253,6 +263,14 @@ fn load_state(project_id: &str) -> Result<ManagedProjectState> {
     let content = fs::read_to_string(&path).with_context(|| format!("missing {}", path))?;
     Ok(serde_json::from_str(&content)?)
 }
+fn action_executor_label(executor: &ActionExecutor) -> &'static str {
+    match executor {
+        ActionExecutor::Shell => "shell",
+        ActionExecutor::InternalDocSync => "internal_doc_sync",
+        ActionExecutor::InternalCollect => "internal_collect",
+    }
+}
+
 fn resolve_action_match(config: &ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> String {
     if let Some(cmd) = config.action_command_overrides.get(&suggestion.title) {
         format!("override:{} => {}", suggestion.title, cmd)
