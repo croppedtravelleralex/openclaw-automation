@@ -1,10 +1,11 @@
-use std::{env, fs, path::Path};
+use std::{env, fs, path::Path, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 mod workflow;
 
+use tokio::time::sleep;
 use workflow::{tick_project, WorkflowActionRecord, WorkflowSuggestion};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,7 +74,8 @@ struct ManagedProjectState {
     last_executed_actions: Vec<WorkflowActionRecord>,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
         Some("init") => init_skeleton(),
@@ -84,6 +86,7 @@ fn main() -> Result<()> {
             println!("autopilot tick ok: project={}, stage={:?}, iteration={}", state.project_id, state.stage, state.loop_iteration);
             Ok(())
         }
+        Some("daemon") => run_daemon(&args[2..]).await,
         _ => {
             print_help();
             Ok(())
@@ -232,4 +235,49 @@ fn print_help() {
     println!("  project-autopilot init   Initialize autopilot skeleton/config/state");
     println!("  project-autopilot show   Show example config/state");
     println!("  project-autopilot tick <project-id>   Execute one autopilot workflow tick");
+    println!("  project-autopilot daemon <project-id> [--interval-seconds N] [--ticks M]   Run periodic autopilot ticks");
+}
+
+async fn run_daemon(args: &[String]) -> Result<()> {
+    let project_id = args.first().map(|s| s.as_str()).unwrap_or("lightpanda-automation");
+    let mut interval_seconds: u64 = 300;
+    let mut max_ticks: usize = 0;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--interval-seconds" => {
+                let value = args.get(i + 1).ok_or_else(|| anyhow!("missing value for --interval-seconds"))?;
+                interval_seconds = value.parse::<u64>()?;
+                i += 2;
+            }
+            "--ticks" => {
+                let value = args.get(i + 1).ok_or_else(|| anyhow!("missing value for --ticks"))?;
+                max_ticks = value.parse::<usize>()?;
+                i += 2;
+            }
+            other => bail!("unknown daemon arg: {}", other),
+        }
+    }
+    if interval_seconds == 0 {
+        bail!("--interval-seconds must be > 0");
+    }
+    println!("autopilot daemon start: project={}, interval={}s, ticks={}", project_id, interval_seconds, max_ticks);
+    let mut executed = 0usize;
+    loop {
+        let state = tick_project(project_id)?;
+        executed += 1;
+        println!(
+            "autopilot daemon tick {} ok: project={}, stage={:?}, iteration={}",
+            executed, state.project_id, state.stage, state.loop_iteration
+        );
+        if !state.pending_confirmation.is_empty() {
+            println!("pending confirmations: {:?}", state.pending_confirmation);
+        }
+        if max_ticks > 0 && executed >= max_ticks {
+            println!("autopilot daemon completed requested ticks");
+            break;
+        }
+        sleep(Duration::from_secs(interval_seconds)).await;
+    }
+    Ok(())
 }
