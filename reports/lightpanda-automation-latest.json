@@ -1,10 +1,10 @@
 {
   "project_id": "lightpanda-automation",
-  "trigger": "key_event",
-  "iteration": 11,
-  "stage": "Execute",
-  "summary": "已完成 plan 阶段，生成下一阶段建议",
-  "focus": "对齐目标文档并生成本轮建议",
+  "trigger": "every_ten_rounds",
+  "iteration": 13,
+  "stage": "DocSync",
+  "summary": "已完成 verify 阶段，准备同步文档",
+  "focus": "验证本轮结果并检查是否需要 bug 环",
   "confirmations": [
     "已达到第 10 轮汇报点，建议向用户汇报当前进展"
   ]

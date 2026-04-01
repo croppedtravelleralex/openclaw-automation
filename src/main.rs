@@ -2,11 +2,11 @@ use std::{env, fs, path::Path, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 
 mod workflow;
 
-use tokio::time::sleep;
-use workflow::{tick_project, WorkflowActionRecord, WorkflowSuggestion};
+use workflow::{discover_projects, tick_project, WorkflowActionRecord, WorkflowSuggestion};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,7 +79,13 @@ async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
         Some("init") => init_skeleton(),
-        Some("show") => show_example(),
+        Some("show") => show_example(args.get(2).map(|s| s.as_str()).unwrap_or("lightpanda-automation")),
+        Some("list-projects") => {
+            for id in discover_projects()? {
+                println!("{}", id);
+            }
+            Ok(())
+        }
         Some("tick") => {
             let project_id = args.get(2).map(|s| s.as_str()).unwrap_or("lightpanda-automation");
             let (state, report) = tick_project(project_id)?;
@@ -142,11 +148,11 @@ fn init_skeleton() -> Result<()> {
     Ok(())
 }
 
-fn show_example() -> Result<()> {
-    let config = fs::read_to_string("configs/lightpanda-automation.json")
-        .context("missing configs/lightpanda-automation.json, run `project-autopilot init` first")?;
-    let state = fs::read_to_string("state/lightpanda-automation.json")
-        .context("missing state/lightpanda-automation.json, run `project-autopilot init` first")?;
+fn show_example(project_id: &str) -> Result<()> {
+    let config = fs::read_to_string(format!("configs/{}.json", project_id))
+        .with_context(|| format!("missing configs/{}.json", project_id))?;
+    let state = fs::read_to_string(format!("state/{}.json", project_id))
+        .with_context(|| format!("missing state/{}.json", project_id))?;
     println!("== config ==\n{}\n\n== state ==\n{}", config, state);
     Ok(())
 }
@@ -200,14 +206,6 @@ fn write_docs() -> Result<()> {
 - 破坏性修改
 - 重依赖安装
 - 连续失败过多
-
-## 下一步
-
-1. 接状态机内核
-2. 接多项目发现器
-3. 接真实建议器
-4. 接数据采集器
-5. 接汇报器
 "#,
     )?;
     fs::write(
@@ -218,16 +216,21 @@ fn write_docs() -> Result<()> {
 
 ## 命令
 
-- `cargo run -- init` 初始化示例配置与状态
-- `cargo run -- show` 查看示例配置与状态
-- `cargo run -- tick <project-id>` 执行一次独立 autopilot tick
+- `cargo run -- init`
+- `cargo run -- show <project-id>`
+- `cargo run -- list-projects`
+- `cargo run -- tick <project-id>`
+- `cargo run -- daemon <project-id> [--interval-seconds N] [--ticks M]`
 
-## 目标
+## 当前能力
 
-- 托管 SelfMadeprojects 下的一个或多个项目
-- 自动生成建议、默认执行前两个
-- 采集数据、每 10 次汇报、关键事件提前汇报
-- 将确认点从“每一步都问”压缩到关键决策点
+- 多项目配置发现
+- 独立 workflow 内核
+- 周期 tick / daemon
+- 每 10 次 + 关键事件报告
+- 文档同步动作
+- 数据采集动作
+- commit 本地门控（push 保留人工确认）
 "#,
     )?;
     Ok(())
@@ -235,10 +238,11 @@ fn write_docs() -> Result<()> {
 
 fn print_help() {
     println!("project-autopilot usage:");
-    println!("  project-autopilot init   Initialize autopilot skeleton/config/state");
-    println!("  project-autopilot show   Show example config/state");
-    println!("  project-autopilot tick <project-id>   Execute one autopilot workflow tick");
-    println!("  project-autopilot daemon <project-id> [--interval-seconds N] [--ticks M]   Run periodic autopilot ticks");
+    println!("  project-autopilot init");
+    println!("  project-autopilot show <project-id>");
+    println!("  project-autopilot list-projects");
+    println!("  project-autopilot tick <project-id>");
+    println!("  project-autopilot daemon <project-id> [--interval-seconds N] [--ticks M]");
 }
 
 async fn run_daemon(args: &[String]) -> Result<()> {
@@ -261,18 +265,12 @@ async fn run_daemon(args: &[String]) -> Result<()> {
             other => bail!("unknown daemon arg: {}", other),
         }
     }
-    if interval_seconds == 0 {
-        bail!("--interval-seconds must be > 0");
-    }
     println!("autopilot daemon start: project={}, interval={}s, ticks={}", project_id, interval_seconds, max_ticks);
     let mut executed = 0usize;
     loop {
         let (state, report) = tick_project(project_id)?;
         executed += 1;
-        println!(
-            "autopilot daemon tick {} ok: project={}, stage={:?}, iteration={}",
-            executed, state.project_id, state.stage, state.loop_iteration
-        );
+        println!("autopilot daemon tick {} ok: project={}, stage={:?}, iteration={}", executed, state.project_id, state.stage, state.loop_iteration);
         if let Some(report) = report {
             println!("autopilot report emitted: trigger={}, iteration={}", report.trigger, report.iteration);
         }
