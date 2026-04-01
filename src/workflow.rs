@@ -662,13 +662,27 @@ fn execute_suggestion(root: &Path, config: &ManagedProjectConfig, state: &Manage
 
 fn sync_project_docs(root: &Path, config: &ManagedProjectConfig) -> Result<String> {
     let status_path = root.join(&config.status_path);
-    let mut content = if status_path.exists() { fs::read_to_string(&status_path)? } else { String::new() };
-    if !content.contains("## Autopilot Sync") {
-        content.push_str("\n## Autopilot Sync\n\n");
+    let content = if status_path.exists() { fs::read_to_string(&status_path)? } else { String::new() };
+    let marker = "## Autopilot Sync";
+    let trimmed = if let Some(idx) = content.find(marker) {
+        content[..idx].trim_end().to_string()
+    } else {
+        content.trim_end().to_string()
+    };
+    let mut next = trimmed;
+    if !next.is_empty() {
+        next.push_str("
+
+");
     }
-    content.push_str("- 独立 autopilot 已执行一轮文档同步检查。\n");
-    fs::write(status_path, content)?;
-    Ok("已将文档同步动作写入 STATUS.md 的 Autopilot Sync 区块".to_string())
+    next.push_str("## Autopilot Sync
+
+");
+    next.push_str("- 独立 autopilot 最近一次文档同步已完成。
+");
+    fs::write(status_path, next + "
+")?;
+    Ok("已刷新 STATUS.md 的 Autopilot Sync 区块（覆盖旧内容，避免重复堆积）".to_string())
 }
 
 fn collect_project_snapshot(root: &Path, config: &ManagedProjectConfig, state: &ManagedProjectState) -> Result<String> {
@@ -763,16 +777,30 @@ fn append_execution_log(root: &Path, entries: &[WorkflowActionRecord]) -> Result
     if entries.is_empty() { return Ok(()); }
     let path = root.join("EXECUTION_LOG.md");
     let existing = if path.exists() { fs::read_to_string(&path)? } else { String::new() };
-    let kept = existing
+    let marker = "## Autopilot Workflow Action Dispatch";
+    let kept_lines = existing
         .lines()
         .filter(|line| !line.contains("已执行最小真实动作：将建议写入 EXECUTION_LOG.md"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut next = kept;
-    if !next.is_empty() && !next.ends_with('\n') { next.push('\n'); }
-    next.push_str("\n## Autopilot Workflow Action Dispatch\n\n");
+        .collect::<Vec<_>>();
+    let kept = kept_lines.join("
+");
+    let base = if let Some(idx) = kept.find(marker) {
+        kept[..idx].trim_end().to_string()
+    } else {
+        kept.trim_end().to_string()
+    };
+    let mut next = base;
+    if !next.is_empty() {
+        next.push_str("
+
+");
+    }
+    next.push_str("## Autopilot Workflow Action Dispatch
+
+");
     for entry in entries {
-        next.push_str(&format!("- {} [{} / {}]: {}\n", entry.title, kind_name(entry.kind), entry.status, entry.note));
+        next.push_str(&format!("- {} [{} / {}]: {}
+", entry.title, kind_name(entry.kind), entry.status, entry.note));
     }
     fs::write(path, next)?;
     Ok(())

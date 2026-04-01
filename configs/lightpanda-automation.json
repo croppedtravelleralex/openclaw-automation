@@ -4,7 +4,7 @@
   "enabled": true,
   "default_execute": true,
   "collect_data": true,
-  "report_every_rounds": 10,
+  "report_every_rounds": 3,
   "report_policy": "hybrid",
   "confirmation_points": [
     "architecture_decision",
