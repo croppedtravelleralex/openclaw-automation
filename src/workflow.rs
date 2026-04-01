@@ -867,9 +867,15 @@ pub fn render_report_message(report: &WorkflowReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
     use std::fs;
     use crate::{ManagedProjectConfig, ManagedProjectState, ReportPolicy};
+
+    fn test_cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn sample_config(root: &Path) -> ManagedProjectConfig {
         ManagedProjectConfig {
@@ -935,6 +941,44 @@ mod tests {
         run_minimal_cycle_step(dir.path(), &config, &mut state).unwrap();
         let status = fs::read_to_string(dir.path().join("STATUS.md")).unwrap();
         assert!(status.contains("Autopilot Sync"));
+    }
+
+    #[test]
+    fn tick_project_exercises_file_backed_flow() {
+        let _guard = test_cwd_lock().lock().unwrap();
+        let repo = tempdir().expect("tempdir");
+        let project_root = repo.path().join("demo-project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::create_dir_all(repo.path().join("configs")).unwrap();
+        fs::create_dir_all(repo.path().join("state")).unwrap();
+        fs::write(project_root.join("VISION.md"), "artifact").unwrap();
+        fs::write(project_root.join("CURRENT_DIRECTION.md"), "trust score verify 文档").unwrap();
+        fs::write(project_root.join("TODO.md"), "同步 CURRENT_* 口径").unwrap();
+        fs::write(project_root.join("STATUS.md"), "# STATUS
+").unwrap();
+        fs::write(project_root.join("PROGRESS.md"), "# PROGRESS
+").unwrap();
+
+        let mut config = sample_config(&project_root);
+        config.id = "demo".to_string();
+        config.root = project_root.display().to_string();
+        config.action_commands.insert("feature".to_string(), "printf integrated > integrated.txt".to_string());
+        let state = sample_state();
+        fs::write(repo.path().join("configs/demo.json"), serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        fs::write(repo.path().join("state/demo.json"), serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(repo.path()).unwrap();
+        let (s1, _) = tick_project("demo").unwrap();
+        let (s2, _) = tick_project("demo").unwrap();
+        std::env::set_current_dir(prev).unwrap();
+
+        assert_eq!(s1.stage, crate::AutopilotStage::Execute);
+        assert_eq!(s2.stage, crate::AutopilotStage::Verify);
+        assert!(project_root.join("integrated.txt").exists());
+        let persisted: crate::ManagedProjectState = serde_json::from_str(&fs::read_to_string(repo.path().join("state/demo.json")).unwrap()).unwrap();
+        assert_eq!(persisted.loop_iteration, 2);
+        assert!(persisted.last_executed_actions.iter().any(|r| r.status.contains("executed_via_plan")));
     }
 
     #[test]
