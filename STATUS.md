@@ -26,3 +26,11 @@
 
 - 已完成 **36 轮** 文件级稳定循环测试
 - 结论：可开始以受控方式接入 `lightpanda-automation`
+
+
+## 真实项目受控接入
+
+- 已在 `lightpanda-automation` 中完成受控接入
+- 已完成一轮 12 tick 和一轮 24 tick 的真实观察
+- 当前累计看到 `iteration=64`，过程中 `consecutive_failures=0`、未进入 `Blocked`
+- 当前结论：可作为低风险自动推进器继续在真实项目中运行

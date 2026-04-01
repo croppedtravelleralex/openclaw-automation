@@ -58,6 +58,9 @@
 
 ## 已验证稳定性
 
+- 已在真实项目 `lightpanda-automation` 中完成受控接入试运行
+- 已完成 12 tick 与后续 24 tick 的连续真实观察，当前累计观测到 `iteration=64` 仍保持 0 次失败、0 次 blocked
+- 当前接入策略：高风险主线走 `shadow-plan`，低风险 verify/docsync/collect 动作可自动执行
 - 已通过真实文件链路下 **36 轮** 连续 tick 稳定性测试
 - 当前测试数：**28 个测试通过**
 - 已验证 `config/state -> tick_project -> ActionPlan -> state持久化` 主干可长期循环
