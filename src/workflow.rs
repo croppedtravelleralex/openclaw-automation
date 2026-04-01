@@ -961,8 +961,7 @@ edition = "2021"
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("EXECUTION_LOG.md"),
-            "- 旧动作 [feature]: 已执行最小真实动作：将建议写入 EXECUTION_LOG.md；原因：x
-",
+            "- 旧动作 [feature]: 已执行最小真实动作：将建议写入 EXECUTION_LOG.md；原因：x\n",
         ).unwrap();
         append_execution_log(dir.path(), &[WorkflowActionRecord {
             title: "新动作".to_string(),
@@ -981,8 +980,7 @@ edition = "2021"
         fs::write(dir.path().join("VISION.md"), "artifact").unwrap();
         fs::write(dir.path().join("CURRENT_DIRECTION.md"), "trust score verify 文档").unwrap();
         fs::write(dir.path().join("TODO.md"), "同步 CURRENT_* 口径").unwrap();
-        fs::write(dir.path().join("STATUS.md"), "# STATUS
-").unwrap();
+        fs::write(dir.path().join("STATUS.md"), "# STATUS\n").unwrap();
         let mut config = sample_config(dir.path());
         config.action_commands.insert("feature".to_string(), "printf executed-cycle >> cycle.log".to_string());
         let mut state = sample_state();
@@ -991,6 +989,53 @@ edition = "2021"
         assert_eq!(state.stage, crate::AutopilotStage::Verify);
         let log = fs::read_to_string(dir.path().join("cycle.log")).unwrap();
         assert!(log.contains("executed-cycle"));
+    }
+
+    #[test]
+    fn paused_loop_repeated_ticks_do_not_advance_iteration() {
+        let mut state = sample_state();
+        state.paused = true;
+        for _ in 0..3 {
+            let before = state.loop_iteration;
+            let now_ms_value = now_ms();
+            if state.paused {
+                let hold_reason = if state.manual_hold_reason.is_empty() { String::new() } else { format!("（manual hold：{}）", state.manual_hold_reason) };
+                state.last_summary = format!("autopilot 当前已暂停{}，跳过本轮 tick", hold_reason);
+                state.current_focus = "等待恢复运行".to_string();
+                state.current_objective = "人工取消 paused/hold 后再继续自动推进".to_string();
+            } else if should_wait_for_cooldown(&state, now_ms_value) {
+                unreachable!();
+            }
+            assert_eq!(state.loop_iteration, before);
+        }
+    }
+
+    #[test]
+    fn cooldown_then_resume_allows_progress_again() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("VISION.md"), "artifact").unwrap();
+        fs::write(dir.path().join("CURRENT_DIRECTION.md"), "trust score verify 文档").unwrap();
+        fs::write(dir.path().join("TODO.md"), "同步 CURRENT_* 口径").unwrap();
+        fs::write(dir.path().join("STATUS.md"), "# STATUS\n").unwrap();
+        let config = sample_config(dir.path());
+        let mut state = sample_state();
+        state.cooldown_until_ms = now_ms() + 60_000;
+
+        let before = state.loop_iteration;
+        let now_ms_value = now_ms();
+        if state.paused {
+            unreachable!();
+        } else if should_wait_for_cooldown(&state, now_ms_value) {
+            let remain_ms = state.cooldown_until_ms.saturating_sub(now_ms_value);
+            state.last_summary = format!("仍在冷却中，{} 秒后再自动重试", remain_ms / 1000);
+            state.current_focus = "冷却等待".to_string();
+            state.current_objective = "跳过本轮执行，等待 backoff 窗口结束".to_string();
+        }
+        assert_eq!(state.loop_iteration, before);
+
+        state.cooldown_until_ms = 0;
+        run_minimal_cycle_step(dir.path(), &config, &mut state).unwrap();
+        assert_eq!(state.loop_iteration, before + 1);
     }
 
     #[test]
