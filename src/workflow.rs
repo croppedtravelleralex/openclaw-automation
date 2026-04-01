@@ -622,21 +622,6 @@ fn run_shell_command(root: &Path, command: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn run_configured_or_plan_action(root: &Path, config: &ManagedProjectConfig, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
-    if let Some(command) = configured_command_for_suggestion(config, suggestion) {
-        let stdout = run_shell_command(root, command)?;
-        let note = if stdout.is_empty() {
-            format!("已执行配置命令：{}", command)
-        } else {
-            format!("已执行配置命令：{}；stdout 摘要：{}", command, stdout.lines().take(2).collect::<Vec<_>>().join(" | "))
-        };
-        append_execution_log(root, &[WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "executed".to_string(), note: note.clone() }])?;
-        Ok(WorkflowActionRecord { title: suggestion.title.clone(), kind: suggestion.kind, status: "executed".to_string(), note })
-    } else {
-        run_plan_record_action(root, suggestion)
-    }
-}
-
 fn run_test_action(root: &Path, suggestion: &WorkflowSuggestion) -> Result<WorkflowActionRecord> {
     if root.join("Cargo.toml").exists() {
         run_status(root, "cargo", &["test", "-q"])?;
@@ -1096,8 +1081,10 @@ edition = "2021"
             rationale: "feature".to_string(),
             kind: WorkflowSuggestionKind::Feature,
         };
-        let record = run_configured_or_plan_action(dir.path(), &config, &suggestion).unwrap();
-        assert_eq!(record.status, "executed");
+        let plan = action_plan_from_suggestion(&config, &suggestion).unwrap();
+        let state = sample_state();
+        let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
+        assert_eq!(record.status, "executed_via_plan");
         assert_eq!(fs::read_to_string(dir.path().join("winner.txt")).unwrap(), "title");
     }
 
@@ -1212,8 +1199,10 @@ edition = "2021"
             rationale: "feature".to_string(),
             kind: WorkflowSuggestionKind::Feature,
         };
-        let record = run_configured_or_plan_action(dir.path(), &config, &suggestion).unwrap();
-        assert_eq!(record.status, "executed");
+        let plan = action_plan_from_suggestion(&config, &suggestion).unwrap();
+        let state = sample_state();
+        let record = run_action_plan(dir.path(), &config, &state, &suggestion, &plan).unwrap();
+        assert_eq!(record.status, "executed_via_plan");
         assert_eq!(fs::read_to_string(dir.path().join("feature.txt")).unwrap(), "executed");
     }
 
