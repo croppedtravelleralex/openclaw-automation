@@ -74,25 +74,29 @@ fn should_wait_for_cooldown(state: &ManagedProjectState, now_ms_value: u64) -> b
 fn register_tick_failure(state: &mut ManagedProjectState, err: &anyhow::Error, now_ms_value: u64) {
     state.consecutive_failures = state.consecutive_failures.saturating_add(1);
     state.last_error = format!("{:#}", err);
+    let (category, hint) = classify_error(err);
+    state.last_error_category = category.to_string();
+    state.recovery_hint = hint;
     state.last_failure_at_ms = now_ms_value;
     let backoff_ms = compute_backoff_ms(state.consecutive_failures);
     state.cooldown_until_ms = now_ms_value.saturating_add(backoff_ms);
     state.current_focus = "处理失败与退避冷却".to_string();
     state.current_objective = "等待冷却结束后自动重试；若连续失败过多则转 blocked".to_string();
     state.last_summary = format!(
-        "tick 失败，第 {} 次连续失败；已进入 {} 秒冷却",
+        "tick 失败（{}），第 {} 次连续失败；已进入 {} 秒冷却",
+        state.last_error_category,
         state.consecutive_failures,
         backoff_ms / 1000
     );
 
     if state.consecutive_failures >= 3 {
         state.stage = AutopilotStage::Blocked;
-        state.blocked_reason = state.last_error.clone();
+        state.blocked_reason = format!("[{}] {}", state.last_error_category, state.last_error);
         push_confirmation_once(
             state,
             confirmation_message(
                 ConfirmationPolicy::RepeatedFailure,
-                &format!("连续失败 {} 次：{}", state.consecutive_failures, state.last_error),
+                &format!("连续失败 {} 次（{}）：{}；恢复建议：{}", state.consecutive_failures, state.last_error_category, state.last_error, state.recovery_hint),
             ),
         );
     }
@@ -101,8 +105,40 @@ fn register_tick_failure(state: &mut ManagedProjectState, err: &anyhow::Error, n
 fn clear_failure_tracking(state: &mut ManagedProjectState) {
     state.consecutive_failures = 0;
     state.last_error.clear();
+    state.last_error_category.clear();
+    state.recovery_hint.clear();
     state.last_failure_at_ms = 0;
     state.cooldown_until_ms = 0;
+}
+
+fn classify_error(err: &anyhow::Error) -> (&'static str, String) {
+    let msg = format!("{:#}", err).to_lowercase();
+    if msg.contains("cargo test") || msg.contains("test failed") {
+        (
+            "test_failure",
+            "检查失败测试与最近改动；先在项目目录复跑 cargo test -q / 定向测试，再决定是否回滚或修复".to_string(),
+        )
+    } else if msg.contains("git status") || msg.contains("git add") || msg.contains("git commit") {
+        (
+            "git_failure",
+            "检查仓库状态、git 初始化与身份配置；必要时先手动处理工作区冲突或缺失仓库问题".to_string(),
+        )
+    } else if msg.contains("failed to read") || msg.contains("no such file") {
+        (
+            "missing_file",
+            "检查项目根目录及 VISION/CURRENT_DIRECTION/TODO/STATUS 等文档是否存在，必要时先补齐基础文件".to_string(),
+        )
+    } else if msg.contains("timed out") || msg.contains("timeout") {
+        (
+            "timeout",
+            "缩小动作范围、增加冷却或改成定向检查；若涉及外部依赖，优先确认网络与上游可用性".to_string(),
+        )
+    } else {
+        (
+            "unknown",
+            "先查看 last_error 原文，再结合当前 stage 与最近动作决定是重试、补文件还是人工接管".to_string(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -639,6 +675,8 @@ mod tests {
             cooldown_until_ms: 0,
             paused: false,
             manual_hold_reason: String::new(),
+            last_error_category: String::new(),
+            recovery_hint: String::new(),
         }
     }
 
@@ -676,6 +714,23 @@ mod tests {
         let msg = render_report_message(&report);
         assert!(msg.contains("项目：demo"));
         assert!(msg.contains("需确认"));
+    }
+
+    #[test]
+    fn error_classifier_detects_missing_files() {
+        let err = anyhow::anyhow!("failed to read /tmp/demo/TODO.md");
+        let (category, hint) = classify_error(&err);
+        assert_eq!(category, "missing_file");
+        assert!(hint.contains("VISION") || hint.contains("TODO"));
+    }
+
+    #[test]
+    fn register_failure_records_category_and_hint() {
+        let mut state = sample_state();
+        let err = anyhow::anyhow!("command failed: cargo test -q");
+        register_tick_failure(&mut state, &err, 1_000);
+        assert_eq!(state.last_error_category, "test_failure");
+        assert!(state.recovery_hint.contains("cargo test -q"));
     }
 
     #[test]

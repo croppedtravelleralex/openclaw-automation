@@ -61,5 +61,7 @@
   "last_failure_at_ms": 0,
   "cooldown_until_ms": 0,
   "paused": false,
-  "manual_hold_reason": ""
+  "manual_hold_reason": "",
+  "last_error_category": "",
+  "recovery_hint": ""
 }

@@ -78,6 +78,8 @@ struct ManagedProjectState {
     cooldown_until_ms: u64,
     paused: bool,
     manual_hold_reason: String,
+    last_error_category: String,
+    recovery_hint: String,
 }
 
 #[tokio::main]
@@ -86,6 +88,7 @@ async fn main() -> Result<()> {
     match args.get(1).map(|s| s.as_str()) {
         Some("init") => init_skeleton(),
         Some("show") => show_example(args.get(2).map(|s| s.as_str()).unwrap_or("lightpanda-automation")),
+        Some("status") => show_status(args.get(2).map(|s| s.as_str()).unwrap_or("lightpanda-automation")),
         Some("list-projects") => {
             for id in discover_projects()? {
                 println!("{}", id);
@@ -156,6 +159,8 @@ fn init_skeleton() -> Result<()> {
         cooldown_until_ms: 0,
         paused: false,
         manual_hold_reason: String::new(),
+        last_error_category: String::new(),
+        recovery_hint: String::new(),
     };
 
     write_json("configs/lightpanda-automation.json", &config)?;
@@ -171,6 +176,23 @@ fn show_example(project_id: &str) -> Result<()> {
     let state = fs::read_to_string(format!("state/{}.json", project_id))
         .with_context(|| format!("missing state/{}.json", project_id))?;
     println!("== config ==\n{}\n\n== state ==\n{}", config, state);
+    Ok(())
+}
+
+fn show_status(project_id: &str) -> Result<()> {
+    let state = load_state(project_id)?;
+    println!("project: {}", state.project_id);
+    println!("stage: {:?}", state.stage);
+    println!("iteration: {}", state.loop_iteration);
+    println!("paused: {}", state.paused);
+    println!("manual_hold_reason: {}", if state.manual_hold_reason.is_empty() { "<none>" } else { &state.manual_hold_reason });
+    println!("consecutive_failures: {}", state.consecutive_failures);
+    println!("last_error_category: {}", if state.last_error_category.is_empty() { "<none>" } else { &state.last_error_category });
+    println!("recovery_hint: {}", if state.recovery_hint.is_empty() { "<none>" } else { &state.recovery_hint });
+    println!("last_summary: {}", state.last_summary);
+    println!("current_focus: {}", state.current_focus);
+    println!("current_objective: {}", state.current_objective);
+    println!("next_report_at: {}", state.next_report_at);
     Ok(())
 }
 
@@ -299,6 +321,7 @@ fn write_docs() -> Result<()> {
 
 - `cargo run -- init`
 - `cargo run -- show <project-id>`
+- `cargo run -- status <project-id>`
 - `cargo run -- list-projects`
 - `cargo run -- tick <project-id>`
 - `cargo run -- pause <project-id>` / `resume <project-id>`
@@ -311,6 +334,7 @@ fn write_docs() -> Result<()> {
 - 独立 workflow 内核
 - 周期 tick / daemon
 - pause / resume / manual hold 控制面
+- status 运行态查询
 - 每 10 次 + 关键事件报告
 - 文档同步动作
 - 数据采集动作
@@ -324,6 +348,7 @@ fn print_help() {
     println!("project-autopilot usage:");
     println!("  project-autopilot init");
     println!("  project-autopilot show <project-id>");
+    println!("  project-autopilot status <project-id>");
     println!("  project-autopilot list-projects");
     println!("  project-autopilot tick <project-id>");
     println!("  project-autopilot pause <project-id>");
