@@ -1,0 +1,21 @@
+{
+  "id": "lightpanda-automation",
+  "root": "/root/SelfMadeprojects/lightpanda-automation",
+  "enabled": true,
+  "default_execute": true,
+  "collect_data": true,
+  "report_every_rounds": 10,
+  "report_policy": "hybrid",
+  "confirmation_points": [
+    "architecture_decision",
+    "external_push",
+    "destructive_change",
+    "heavy_install",
+    "repeated_failure"
+  ],
+  "vision_path": "VISION.md",
+  "direction_path": "CURRENT_DIRECTION.md",
+  "todo_path": "TODO.md",
+  "status_path": "STATUS.md",
+  "progress_path": "PROGRESS.md"
+}
